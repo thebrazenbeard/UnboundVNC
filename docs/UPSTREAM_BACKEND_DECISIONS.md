@@ -24,17 +24,17 @@
 
 ## Security and semantics that block naive integration
 
-1. `x0vncserver` commonly listens on TCP 5900/all interfaces with broad input options unless configured. Limit to a Unix-domain socket or loopback, explicitly select security types and permissions, and enforce UnboundVNC's own consent/revocation lifecycle.
+1. `x0vncserver` commonly listens on TCP 5900/all interfaces with broad input options unless configured. Limit to a Unix-domain socket or loopback, explicitly select security types and permissions, and enforce UnboundVNC's own consent/revocation lifecycle **only when UnboundVNC owns a managed host wrapper**. An arbitrary external RFB server keeps authority over its own policies. Source review predicts a possible noVNC 1.7 VeNCrypt→classic VNCAuth selection with TigerVNC `TLSVnc,VncAuth` defaults; require actual negotiated subtype capture and downgrade rejection, not just a successful WebSocket or VeNCrypt handshake.
 2. `x11vnc` upstream states it lacks a maintainer. [Reported issue #278](https://github.com/LibVNC/x11vnc/issues/278) concerns a possible pre-auth denial-of-service in TLS Plain/`-unixpw`. Treat as an unresolved source-level risk; exploitability was not independently demonstrated in this review.
 3. `xrdp`'s inbound RDP traffic and its VNC-proxy leg are different security paths. A secure RDP connection does not itself secure outbound classic VNC auth. Use current patched releases; [v0.10.6.1 release](https://github.com/neutrinolabs/xrdp/releases/tag/v0.10.6.1) addresses multiple vulnerabilities.
 4. `xorgxrdp` creates a remotely accessible **Linux Xorg login/session**, not RealVNC-style sharing of Windows' current console. WSLg/Linux GUI tests are not Windows capture qualification.
-5. `xdg-output` does not identify which captured PipeWire stream belongs to a monitor without additional trustworthy mapping. Account for v2/v3 done semantics, scaling, rotation, negative origins, hotplug, and absence.
+5. `xdg-output` does not identify which captured PipeWire stream belongs to a monitor without additional trustworthy mapping. **Portal ScreenCast stream metadata is authoritative for a portal capture session**; do not treat PipeWire node IDs as persistent device identity. Where supported, inspect portal `mapping_id` (newer RemoteDesktop versions) and `pipewire-serial` (ScreenCast v6) rather than inventing an xdg-output-only correlation. Account for xdg-output v1/v2/v3 `done` semantics, scaling, rotation, negative origins, hotplug, and absence.
 6. `virtual-input` does not capture pixels, and the existence of a Wayland virtual-input global is **not** a user's consent. Prefer portal-mediated input authorization and separately authorized PipeWire ScreenCast; ensure revoked sessions flush queued input and release keys.
 
 ## Future adapter acceptance, not a release-1 prerequisite
 
 - **Linux X11**: x0vncserver and x11vnc independently installed, confined to loopback/Unix socket, tested against viewer/gateway; negative access, input, clipboard and session teardown tests.
-- **Linux Wayland**: compositor capability detection; portal rejection; output-to-stream mapping; monitor scaling/hotplug; no input before consent; permission revocation; optional `w0vncserver` compatibility.
+- **Linux Wayland**: compositor capability detection; portal rejection; versioned portal stream metadata and stable-session mapping; output-to-stream mapping; monitor scaling/hotplug; no input before consent; permission revocation; optional `w0vncserver` compatibility. Do not assume any compositor or portal advertises a particular protocol version or stream identifier.
 - **RDP**: a **separate RDP client** adapter (e.g. evaluate FreeRDP if needed) to reach xrdp; xrdp/xorgxrdp installation and TLS, session resizing, reconnect, deny tests. Do not assume an RFB viewer connects directly to xrdp.
 
 ## Source checkpoints reviewed by the specialists
