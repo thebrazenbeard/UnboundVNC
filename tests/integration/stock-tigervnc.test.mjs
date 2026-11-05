@@ -46,8 +46,10 @@ async function assertLoopbackListener(port) {
   assert.ok(listeners.every(fields => fields[1] === `0100007F:${hexPort}`),
     `RFB port ${port} is not exclusively bound to IPv4 loopback`);
   const tcp6 = await readFile('/proc/net/tcp6', 'utf8');
-  assert.equal(tcp6.split('\n').slice(1).filter(line => line.trim().split(/\s+/)[1]?.endsWith(`:${hexPort}`) && line.trim().split(/\s+/)[3] === '0A').length, 0,
-    'unexpected IPv6 RFB listener (loopback-only boundary unverified)');
+  const ipv6Listeners = tcp6.split('\n').slice(1).map(line => line.trim().split(/\s+/))
+    .filter(fields => fields[1]?.endsWith(`:${hexPort}`) && fields[3] === '0A');
+  assert.ok(ipv6Listeners.every(fields => fields[1] === `00000000000000000000000001000000:${hexPort}`),
+    'RFB listener on non-loopback IPv6 interface');
 }
 
 async function startTiger(t) {
