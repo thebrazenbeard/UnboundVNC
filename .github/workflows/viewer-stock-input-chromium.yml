@@ -1,0 +1,53 @@
+name: Stock TigerVNC Chromium input witness (loopback)
+
+on:
+  pull_request:
+    paths:
+      - 'apps/viewer/**'
+      - 'apps/gateway/src/server.mjs'
+      - '.github/workflows/viewer-stock-input-chromium.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  stock-browser-input:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: apps/viewer
+    env:
+      UNBOUNDVNC_INPUT_SCREENSHOT_DIR: ${{ github.workspace }}/artifacts/stock-input-chromium
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: apps/viewer/package-lock.json
+      - name: Install independent TigerVNC and X11 event witness
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends tigervnc-standalone-server x11-xserver-utils x11-utils xdotool
+          command -v Xtigervnc
+          command -v xev
+          command -v xdotool
+      - name: Install viewer and test-only Chromium
+        run: |
+          npm ci
+          npm install --no-save --package-lock=false --ignore-scripts playwright@1.56.1
+          npx playwright install chromium
+      - name: Verify real pointer and keyboard delivery and view-only suppression
+        run: node e2e/stock-input.mjs
+      - name: Upload test-owned X11 input evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stock-input-chromium-evidence
+          path: artifacts/stock-input-chromium/
+          if-no-files-found: warn
+          retention-days: 7
