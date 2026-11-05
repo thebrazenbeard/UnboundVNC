@@ -106,7 +106,7 @@ async function openWs(address, path) {
 
 test('RFB bytes traverse local gateway to a synthetic RFB server', async t => {
   const rfb = await createRfbFixture().start();
-  const gateway = createGateway({ port: 0 });
+  const gateway = createGateway({ port: 0, allowedPorts: [rfb.port] });
   const origin = await gateway.listen();
   const clients = [];
   t.after(async () => {
