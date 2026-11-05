@@ -31,7 +31,7 @@ and abrupt client destruction. The test rejects any IPv4/IPv6 VNC listener
 outside 127.0.0.1/::1.
 
 The opt-in command, after installing Ubuntu's `xvfb`, `x11-xserver-utils`,
-`x11vnc` and `tigervnc-scraping-server` packages, is:
+`x11-apps`, `x11vnc` and `tigervnc-scraping-server` packages, is:
 
 ```bash
 RFB_X11_SCRAPERS=1 node --test tests/integration/x11-display-backends.test.mjs
