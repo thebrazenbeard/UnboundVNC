@@ -1,0 +1,38 @@
+name: Windows attended host build
+on:
+  pull_request:
+    paths:
+      - 'apps/host-windows/**'
+      - 'tests/host-windows-input/**'
+      - 'tests/host-windows-effect-safety/**'
+      - 'tests/host-windows-runner-desktop/**'
+      - 'tests/host-windows-ci-rfb/**'
+      - '.github/workflows/windows-host-build.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Restore
+        run: dotnet restore apps/host-windows/UnboundVnc.Host.Windows.csproj
+      - name: Build
+        run: dotnet build apps/host-windows/UnboundVnc.Host.Windows.csproj --no-restore --configuration Release
+      - name: Pending-consent loopback checks
+        run: dotnet run --project tests/host-windows-consent/HostConsentChecks.csproj --configuration Release
+      - name: Disabled input policy checks
+        run: dotnet run --project tests/host-windows-input/HostInputPolicyChecks.csproj --configuration Release
+      - name: Host assembly native input disabled and fake release-failure checks
+        run: dotnet run --project tests/host-windows-effect-safety/HostEffectSafetyChecks.csproj --configuration Release -- apps/host-windows/bin/Release/net8.0-windows/UnboundVnc.Host.Windows.dll
+      - name: Hosted Windows desktop probe (diagnostic only; no consent simulation)
+        run: dotnet run --project tests/host-windows-runner-desktop/RunnerDesktopProbe.csproj --configuration Release -- apps/host-windows/bin/Release/net8.0-windows/UnboundVnc.Host.Windows.exe
+      - name: Ephemeral runner synthetic consent and 32x24 Raw window oracle (not human approval)
+        timeout-minutes: 3
+        env:
+          UNBOUNDVNC_CI_SYNTHETIC_CONSENT: explicit-runner-only
+        run: dotnet run --project tests/host-windows-ci-rfb/HostedRfbSyntheticConsent.csproj --configuration Release -- apps/host-windows/bin/Release/net8.0-windows/UnboundVnc.Host.Windows.exe

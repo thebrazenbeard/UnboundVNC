@@ -1,0 +1,23 @@
+name: Windows attended host IPC caller falsifier (default OFF)
+
+on:
+  pull_request:
+    paths:
+      - 'experiments/windows-host-consent-ipc/**'
+      - '.github/workflows/windows-host-consent-ipc-falsifier.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  same-user-pipe-counterexample:
+    runs-on: windows-2025
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Build and run isolated same-user IPC caller falsifier
+        run: dotnet run --project experiments/windows-host-consent-ipc/WindowsHostConsentIpcFalsifier.csproj --configuration Release

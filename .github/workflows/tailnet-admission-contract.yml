@@ -1,0 +1,23 @@
+name: Private tailnet admission source-only contract
+on:
+  pull_request:
+    paths:
+      - 'tests/security/tailnet/**'
+      - 'docs/TAILNET_REMOTE_ROUTING_CANDIDATE.md'
+      - '.github/workflows/tailnet-admission-contract.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  fake-peer-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Fake-peer model plus real loopback gateway boundary (no tailnet)
+        run: node --test tests/security/tailnet/*.test.mjs
+      - name: Existing loopback-only gateway regressions
+        run: npm test --prefix apps/gateway

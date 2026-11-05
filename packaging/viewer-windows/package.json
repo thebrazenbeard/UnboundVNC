@@ -1,0 +1,16 @@
+{
+  "name": "unboundvnc-viewer-desktop-preview",
+  "version": "0.0.1",
+  "private": true,
+  "main": "main.cjs",
+  "description": "Unsigned experimental Windows desktop wrapper, not an installed viewer release",
+  "license": "SEE LICENSE IN REPOSITORY ROOT",
+  "devDependencies": {
+    "@electron/packager": "20.3.0",
+    "electron": "45.2.1"
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "license:metadata": "node scripts/license-inventory.mjs --check"
+  }
+}

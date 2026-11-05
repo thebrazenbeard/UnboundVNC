@@ -1,0 +1,65 @@
+name: Windows desktop viewer disposable-copy lifecycle
+
+on:
+  pull_request:
+    paths:
+      - 'packaging/viewer-windows/**'
+      - '.github/workflows/windows-viewer-copy-lifecycle.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  windows-copy-lifecycle:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out exact PR source without persisted credentials
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Use Node 24 for Vite and Electron source
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Install pinned production-viewer and desktop dependencies
+        shell: pwsh
+        run: |
+          npm ci --prefix apps/viewer --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { throw 'Viewer dependency installation failed.' }
+          npm run build --prefix apps/viewer
+          if ($LASTEXITCODE -ne 0) { throw 'Viewer production build failed.' }
+          npm ci --prefix packaging/viewer-windows --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { throw 'Electron source dependency installation failed.' }
+
+      - name: Run loopback HTTP/WS source tests
+        shell: pwsh
+        run: |
+          node --test packaging/viewer-windows/tests/local-server.test.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'Gateway policy source tests failed.' }
+
+      - name: Prepare and build unsigned unpacked app folder in ephemeral runner temp
+        shell: pwsh
+        run: |
+          node packaging/viewer-windows/scripts/prepare.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'Desktop source preparation failed.' }
+          $out = Join-Path $env:RUNNER_TEMP 'unboundvnc-viewer-desktop-check'
+          & './packaging/viewer-windows/node_modules/.bin/electron-packager.cmd' packaging/viewer-windows UnboundVNCViewer --platform=win32 --arch=x64 --out=$out --asar
+          if ($LASTEXITCODE -ne 0) { throw 'Unsigned app-folder build failed.' }
+          Write-Host 'BUILD ONLY: ephemeral unsigned Electron folder; no installer or distributable artifact.'
+
+      - name: Refuse unsafe cleanup paths before lifecycle execution
+        shell: pwsh
+        run: ./packaging/viewer-windows/tests/Invoke-CopiedViewerLifecycle.ps1 -Mode guard
+
+      - name: Verify cleanup after injected interruption post-copy
+        shell: pwsh
+        run: ./packaging/viewer-windows/tests/Invoke-CopiedViewerLifecycle.ps1 -Mode abort-after-copy
+
+      - name: Copy full app folder, launch real Electron/renderer RFB pixels, disconnect, stop, clean copy
+        shell: pwsh
+        run: ./packaging/viewer-windows/tests/Invoke-CopiedViewerLifecycle.ps1 -Mode full
+
+      # Intentionally no upload-artifact: no binary, test framebuffer, or user profile.

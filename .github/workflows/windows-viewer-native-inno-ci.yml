@@ -1,0 +1,53 @@
+name: Windows viewer native Inno engine CI-only preview
+
+on:
+  pull_request:
+    paths:
+      - 'packaging/viewer-windows/installer-native-preview/**'
+      - '.github/workflows/windows-viewer-native-inno-ci.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  hosted-native-installer-preview:
+    runs-on: windows-2025
+    timeout-minutes: 20
+    steps:
+      - name: Exact PR source, no retained credentials
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Reproduce pinned renderer and packager dependency tree
+        shell: pwsh
+        run: |
+          npm ci --prefix apps/viewer --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { throw 'Renderer npm ci failed.' }
+          npm run build --prefix apps/viewer
+          if ($LASTEXITCODE -ne 0) { throw 'Renderer build failed.' }
+          npm ci --prefix packaging/viewer-windows --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { throw 'Desktop npm ci failed.' }
+          node --test packaging/viewer-windows/tests/local-server.test.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'Loopback gateway tests failed.' }
+
+      - name: Package disposable unsigned Electron app folder
+        shell: pwsh
+        run: |
+          node packaging/viewer-windows/scripts/prepare.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'Desktop source preparation failed.' }
+          $output = Join-Path $env:RUNNER_TEMP 'unboundvnc-viewer-desktop-check'
+          & './packaging/viewer-windows/node_modules/.bin/electron-packager.cmd' packaging/viewer-windows UnboundVNCViewer --platform=win32 --arch=x64 --out=$output --asar
+          if ($LASTEXITCODE -ne 0) { throw 'Unsigned Electron app-folder build failed.' }
+
+      - name: Compile real Inno setup, actual temp-scope install, launch RFB and uninstall
+        shell: pwsh
+        run: ./packaging/viewer-windows/installer-native-preview/Invoke-HostedInnoAcceptance.ps1
+
+      # Intentionally NO upload-artifact and NO release. Setup.exe and uninstaller
+      # are deleted by the receipt script before the hosted job exits.

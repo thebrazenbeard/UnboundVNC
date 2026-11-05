@@ -1,0 +1,51 @@
+name: Stock TigerVNC to Chromium framebuffer (loopback)
+
+on:
+  pull_request:
+    paths:
+      - 'apps/viewer/**'
+      - 'apps/gateway/src/server.mjs'
+      - '.github/workflows/viewer-stock-rfb-chromium.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  stock-browser-framebuffer:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: apps/viewer
+    env:
+      UNBOUNDVNC_STOCK_SCREENSHOT_DIR: ${{ github.workspace }}/artifacts/stock-rfb-chromium
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: apps/viewer/package-lock.json
+      - name: Install independent stock TigerVNC X11 server
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends tigervnc-standalone-server x11-xserver-utils
+          dpkg-query -W -f='${Package} ${Version}\n' tigervnc-standalone-server
+      - name: Install viewer and test-only Playwright
+        run: |
+          npm ci
+          npm install --no-save --package-lock=false --ignore-scripts playwright@1.56.1
+          npx playwright install chromium
+      - name: Render real RFB X11 root pixel through gateway in Chromium
+        run: node e2e/stock-rfb.mjs
+      - name: Upload real framebuffer browser evidence, even on test failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stock-rfb-chromium-evidence
+          path: artifacts/stock-rfb-chromium/
+          if-no-files-found: warn
+          retention-days: 7
