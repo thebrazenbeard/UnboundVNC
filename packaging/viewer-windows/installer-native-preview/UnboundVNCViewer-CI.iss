@@ -53,6 +53,14 @@ Source: "{#CI_Source}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs 
 Source: "{#CI_OwnerFile}"; DestDir: "{app}"; DestName: ".unboundvnc-ci-installer-owned"; Flags: ignoreversion
 Source: "{#CI_ManifestFile}"; DestDir: "{app}"; DestName: ".unboundvnc-ci-manifest"; Flags: ignoreversion
 
+; Adversarial native-log fixture ONLY when the isolated hosted harness passes
+; CI_ProbeDelete. It intentionally records a valid deletion of a synthetic
+; sibling decoy, always inside the test-owned GUID RUNNER_TEMP root.
+#ifdef CI_ProbeDelete
+[UninstallDelete]
+Type: files; Name: "{#CI_ProbeDelete}"
+#endif
+
 [Code]
 function IsExactOwnedLocation: Boolean;
 begin

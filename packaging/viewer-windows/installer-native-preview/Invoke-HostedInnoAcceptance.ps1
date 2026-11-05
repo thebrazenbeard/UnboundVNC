@@ -340,6 +340,79 @@ try {
     Write-Host "NATIVE DELETION-PLAN RESTORE PASS ($datCase): pristine unins000.dat SHA256 restored."
   }
 
+  # A syntactically valid *different* uninstall log is a stronger test than
+  # byte-flipping Inno's CRC-checked file. Have the actual engine generate one
+  # for the same AppId, with a single explicit deletion OUTSIDE {app}, but
+  # still strictly INSIDE this unique runner-owned GUID root. Prove the extra
+  # deletion fires for its own matching uninstaller (positive control), then
+  # transplant the saved log to the ordinary owned install and require its
+  # original native uninstaller to refuse without touching a sibling decoy.
+  $probeInstall=Join-Path $root 'probe/User/LocalAppData/Programs/UnboundVNCViewer'
+  $probeBuild=Join-Path $root 'probe-compiler-output'
+  foreach($testPath in @($probeInstall,$probeBuild,$decoy)) {
+    $resolvedTestPath=[IO.Path]::GetFullPath($testPath)
+    if(-not $resolvedTestPath.StartsWith("$root\",[StringComparison]::OrdinalIgnoreCase)) {
+      throw "Refusing a hostile native-log fixture outside GUID-owned root: $testPath"
+    }
+  }
+  Assert-NoReparse $root
+  $null=New-Item -ItemType Directory -Path $probeBuild -Force
+  $probeCompilerArgs=@(
+    "-dCI_Source=$source","-dCI_Target=$probeInstall",
+    "-dCI_Output=$probeBuild","-dCI_OwnerFile=$ownerFile",
+    "-dCI_Guid=$guid","-dCI_ManifestFile=$manifestFile",
+    "-dCI_ManifestHash=$manifestHash","-dCI_ManifestCount=$($manifestRows.Count)",
+    "-dCI_ProbeDelete=$decoy",$iss
+  )
+  & $compiler @probeCompilerArgs
+  if($LASTEXITCODE -ne 0) { throw 'CI-only hostile native-plan fixture compilation failed.' }
+  $probeSetup=Join-Path $probeBuild 'UnboundVNCViewer-CI-ONLY-Setup.exe'
+  if(-not (Test-Path -LiteralPath $probeSetup -PathType Leaf) -or
+      (Get-AuthenticodeSignature -LiteralPath $probeSetup).Status -ne 'NotSigned') {
+    throw 'CI-only hostile native-plan setup is missing or unexpectedly signed.'
+  }
+  $probeInstalled=Start-Process -FilePath $probeSetup -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-') -PassThru -Wait
+  if($probeInstalled.ExitCode -ne 0) { throw "CI-only hostile native-plan setup exited $($probeInstalled.ExitCode)." }
+  $probeDat=Join-Path $probeInstall 'unins000.dat'
+  $probeUninstaller=Join-Path $probeInstall 'unins000.exe'
+  if(-not (Test-Path -LiteralPath $probeDat -PathType Leaf) -or
+      -not (Test-Path -LiteralPath $probeUninstaller -PathType Leaf)) {
+    throw 'Actual Inno engine did not generate hostile-log fixture files.'
+  }
+  $validSubstitute=Join-Path $root 'foreign-crc-valid-unins000.dat.test-backup'
+  Copy-Item -LiteralPath $probeDat -Destination $validSubstitute
+  $validSubstituteHash=(Get-FileHash -LiteralPath $validSubstitute -Algorithm SHA256).Hash
+  if($validSubstituteHash -ceq $datHash) { throw 'Foreign native deletion-plan unexpectedly matches the original log SHA256.' }
+  $probeExit=Invoke-NativeUninstallerBounded $probeUninstaller 'probe-plan positive control'
+  if($probeExit -ne 0 -or (Test-Path -LiteralPath $decoy) -or
+      (Test-Path -LiteralPath $probeInstall)) {
+    throw "Hostile-log positive control did not delete only its owned app and the GUID-root sibling decoy; exit=$probeExit."
+  }
+  Set-Content -LiteralPath $decoy -Value 'test-owned decoy not part of install' -NoNewline
+  if((Get-FileHash -LiteralPath $decoy -Algorithm SHA256).Hash -cne $decoyHash) {
+    throw 'Hostile-log control failed to recreate exact test-owned sibling decoy.'
+  }
+  Write-Host "NATIVE VALID-PLAN CONTROL PASS: same-AppId engine-generated foreign unins000.dat SHA256=$validSubstituteHash deleted ONLY test-owned decoy and probe app."
+
+  try {
+    Copy-Item -LiteralPath $validSubstitute -Destination $uninstallDat -Force
+    if((Get-FileHash -LiteralPath $uninstallDat -Algorithm SHA256).Hash -cne $validSubstituteHash) {
+      throw 'Foreign native deletion-plan was not installed for negative test.'
+    }
+    $null=Assert-InstallOwned $before
+    Assert-NativeUninstallRefusal 'same-AppId valid foreign deletion-plan' $before $uninstaller $decoy $decoyHash
+  } finally {
+    if(Test-Path -LiteralPath $install -PathType Container) {
+      Copy-Item -LiteralPath $uninstallDatBackup -Destination $uninstallDat -Force
+    }
+  }
+  if(-not (Test-Path -LiteralPath $uninstallDat -PathType Leaf) -or
+      (Get-FileHash -LiteralPath $uninstallDat -Algorithm SHA256).Hash -cne $datHash) {
+    throw 'Original native deletion-plan restoration failed after valid hostile plan.'
+  }
+  $null=Assert-InstallOwned $before
+  Write-Host 'NATIVE VALID-PLAN REFUSAL PASS: original uninstaller refused engine-valid same-AppId foreign log; pristine SHA256 restored.'
+
   $uninstaller=Assert-InstallOwned $before
   $nativeExit=Invoke-NativeUninstallerBounded $uninstaller 'clean expected uninstall'
   if($nativeExit -ne 0) { throw "Native Inno uninstaller returned $nativeExit." }
