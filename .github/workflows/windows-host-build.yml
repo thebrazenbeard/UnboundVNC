@@ -19,3 +19,5 @@ jobs:
         run: dotnet restore apps/host-windows/UnboundVnc.Host.Windows.csproj
       - name: Build
         run: dotnet build apps/host-windows/UnboundVnc.Host.Windows.csproj --no-restore --configuration Release
+      - name: Pending-consent loopback checks
+        run: dotnet run --project tests/host-windows-consent/HostConsentChecks.csproj --configuration Release

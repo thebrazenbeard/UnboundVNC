@@ -102,13 +102,14 @@ internal sealed class HostWindow : Form
             while (!cancellation.IsCancellationRequested)
             {
                 using var client = await server.AcceptTcpClientAsync(cancellation);
-                // A single controller at a time, with no pending-session queue.
+                // One accepted session at a time; Start(1) still has an OS backlog of one.
                 if (activeClient is not null) continue;
                 activeClient = client;
                 try
                 {
                     var offeredEpoch = Volatile.Read(ref consentEpoch);
-                    if (!await ApproveConnection(cancellation).ConfigureAwait(false) ||
+                    if (!await PendingConsentMonitor.ApproveWhileConnected(
+                            client.Client, ApproveConnection, cancellation).ConfigureAwait(false) ||
                         Volatile.Read(ref consentEpoch) != offeredEpoch) continue;
                     var authorizedEpoch = offeredEpoch;
                     using var session = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
