@@ -472,6 +472,11 @@ document.getElementById('credentials-form').addEventListener('submit', event => 
   rfb.sendCredentials(credentials);
 });
 document.getElementById('credentials-cancel').addEventListener('click', disconnect);
+window.addEventListener('pagehide', () => {
+  // Navigation can page-cache a live document without calling hideSession().
+  // Drop any VNC credential typed but not submitted before it is cached.
+  document.getElementById('credentials-form').reset();
+});
 document.getElementById('identity-reject').addEventListener('click', disconnect);
 for (const id of ['credentials-dialog', 'identity-dialog']) {
   document.getElementById(id).addEventListener('cancel', event => {
