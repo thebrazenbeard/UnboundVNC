@@ -13,27 +13,38 @@ Check("actual host assembly has no new user32 input-effect import", () =>
 {
     var host = Assembly.LoadFrom(hostDll);
     Require(host.GetName().Name == "UnboundVnc.Host.Windows", "inspecting an unexpected managed assembly");
-    var allowedUser32 = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-        { "OpenInputDesktop", "GetUserObjectInformationW", "CloseDesktop" };
-    var prohibited = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-        { "SendInput", "SetCursorPos", "mouse_event", "keybd_event", "SendMessageW", "PostMessageW" };
-    foreach (var type in host.GetTypes())
-    foreach (var method in type.GetMethods(BindingFlags.Public | BindingFlags.NonPublic |
-                                            BindingFlags.Static | BindingFlags.Instance |
-                                            BindingFlags.DeclaredOnly))
-    {
-        var import = method.GetCustomAttribute<DllImportAttribute>();
-        if (import is null) continue;
-        var entryPoint = import.EntryPoint ?? method.Name;
-        Require(!prohibited.Contains(entryPoint), $"native input entry point present: {entryPoint}");
-        if (import.Value.Equals("user32.dll", StringComparison.OrdinalIgnoreCase))
-            Require(allowedUser32.Contains(entryPoint), $"unexpected user32 import: {entryPoint}");
-    }
+    AssertAllowedNativeImports(host.GetTypes().SelectMany(type => type.GetMethods(
+        BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static |
+        BindingFlags.Instance | BindingFlags.DeclaredOnly)));
     Require(!NativeInputAdapter.Enabled, "source adapter unexpectedly enabled");
     Require(!NativeInputAdapter.TryInject(new NormalizedKey(true, LocalKeyKind.Printable, 'x'),
         LocalInputConsent.AllowControl, true, true), "source key adapter injected");
     Require(!NativeInputAdapter.TryInject(new NormalizedPointer(20, 30, 1),
         LocalInputConsent.AllowControl, true, true), "source pointer adapter injected");
+});
+
+Check("host native import guard rejects test-only forbidden imports", () =>
+{
+    var fixture = typeof(NativeImportGuardMutationFixture);
+    const BindingFlags flags = BindingFlags.NonPublic | BindingFlags.Static;
+    foreach (var name in new[]
+             {
+                 nameof(NativeImportGuardMutationFixture.SendInputAlias),
+                 nameof(NativeImportGuardMutationFixture.SetCursorPosAlias),
+                 nameof(NativeImportGuardMutationFixture.UnexpectedUser32),
+                 nameof(NativeImportGuardMutationFixture.SendInputWrongLibrary)
+             })
+    {
+        var method = fixture.GetMethod(name, flags) ?? throw new InvalidOperationException(name);
+        bool rejected = false;
+        try { AssertAllowedNativeImports(new[] { method }); }
+        catch (InvalidOperationException) { rejected = true; }
+        Require(rejected, $"import policy silently accepted fixture {name}");
+    }
+
+    var readOnly = fixture.GetMethod(nameof(NativeImportGuardMutationFixture.AllowedDesktopQuery), flags)
+        ?? throw new InvalidOperationException("missing read-only fixture");
+    AssertAllowedNativeImports(new[] { readOnly });
 });
 
 Check("fake default deny, view only, canceled, stale epoch and lock issue zero effects", () =>
@@ -169,7 +180,24 @@ Check("concurrent Stop revokes in-flight fake effect before returning", () =>
     finally { resume.Set(); }
 });
 
-Console.WriteLine("PASS: 9 hosted Windows native-effect negative groups; real native input remains OFF");
+Console.WriteLine("PASS: 10 hosted Windows native-effect negative groups; real native input remains OFF");
+
+static void AssertAllowedNativeImports(IEnumerable<MethodInfo> methods)
+{
+    var allowedUser32 = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        { "OpenInputDesktop", "GetUserObjectInformationW", "CloseDesktop" };
+    var prohibited = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        { "SendInput", "SetCursorPos", "mouse_event", "keybd_event", "SendMessageW", "PostMessageW" };
+    foreach (var method in methods)
+    {
+        var import = method.GetCustomAttribute<DllImportAttribute>();
+        if (import is null) continue;
+        var entryPoint = import.EntryPoint ?? method.Name;
+        Require(!prohibited.Contains(entryPoint), $"native input entry point present: {entryPoint}");
+        if (import.Value.Equals("user32.dll", StringComparison.OrdinalIgnoreCase))
+            Require(allowedUser32.Contains(entryPoint), $"unexpected user32 import: {entryPoint}");
+    }
+}
 
 static void Check(string label, Action work)
 {
@@ -238,4 +266,24 @@ internal sealed class FakeEffectGate
             }
         }
     }
+}
+
+// Test-only metadata probes. These extern methods must never be invoked; the
+// reflection guard inspects their DllImport declarations without loading Win32.
+internal static class NativeImportGuardMutationFixture
+{
+    [DllImport("user32.dll", EntryPoint = "SendInput")]
+    internal static extern uint SendInputAlias();
+
+    [DllImport("user32.dll", EntryPoint = "SetCursorPos")]
+    internal static extern bool SetCursorPosAlias();
+
+    [DllImport("user32.dll", EntryPoint = "GetCursorPos")]
+    internal static extern bool UnexpectedUser32();
+
+    [DllImport("other.dll", EntryPoint = "SendInput")]
+    internal static extern uint SendInputWrongLibrary();
+
+    [DllImport("user32.dll", EntryPoint = "OpenInputDesktop")]
+    internal static extern IntPtr AllowedDesktopQuery();
 }
