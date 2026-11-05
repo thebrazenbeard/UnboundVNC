@@ -1,0 +1,48 @@
+name: Windows preview viewer crash-journal recovery
+
+on:
+  pull_request:
+    paths:
+      - 'packaging/viewer-windows/installer-preview/**'
+      - '.github/workflows/windows-viewer-preview-crash-recovery.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  windows-crash-journal:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out exact PR source without storing credentials
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Node 24 source-only toolchain
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Pinned browser/desktop source build and local gateway test
+        shell: pwsh
+        run: |
+          npm ci --prefix apps/viewer --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { throw 'Viewer dependency install failed.' }
+          npm run build --prefix apps/viewer
+          if ($LASTEXITCODE -ne 0) { throw 'Production renderer build failed.' }
+          npm ci --prefix packaging/viewer-windows --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { throw 'Desktop dependency install failed.' }
+          node --test packaging/viewer-windows/tests/local-server.test.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'Gateway tests failed.' }
+      - name: Build unsigned app folder solely for ephemeral crash recovery checks
+        shell: pwsh
+        run: |
+          node packaging/viewer-windows/scripts/prepare.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'Desktop source prepare failed.' }
+          $out = Join-Path $env:RUNNER_TEMP 'unboundvnc-viewer-desktop-check'
+          & './packaging/viewer-windows/node_modules/.bin/electron-packager.cmd' packaging/viewer-windows UnboundVNCViewer --platform=win32 --arch=x64 --out=$out --asar
+          if ($LASTEXITCODE -ne 0) { throw 'Unsigned folder build failed.' }
+      - name: Kill owned transaction processes at durable checkpoints and recover safely
+        shell: pwsh
+        run: ./packaging/viewer-windows/installer-preview/Invoke-HostedCrashRecovery.ps1
+
+      # Intentionally no installer generation, install to user profile or artifact upload.
