@@ -22,10 +22,11 @@ jobs:
       - name: Install Ubuntu-maintained binary packages (no vendored GPL source)
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends xvfb x11-xserver-utils x11vnc tigervnc-scraping-server
-          dpkg-query -W -f='${Package} ${Version}\n' xvfb x11-xserver-utils x11vnc tigervnc-scraping-server
+          sudo apt-get install -y --no-install-recommends xvfb x11-xserver-utils x11-apps x11vnc tigervnc-scraping-server
+          dpkg-query -W -f='${Package} ${Version}\n' xvfb x11-xserver-utils x11-apps x11vnc tigervnc-scraping-server
           command -v Xvfb
           command -v xsetroot
+          command -v xwd
           command -v x11vnc
           command -v X0tigervnc
       - name: Exercise two independent stock RFB scrapers over gateway loopback
