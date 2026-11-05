@@ -81,8 +81,17 @@ internal sealed class HostWindow : Form
 
     private void OnSessionSwitch(object sender, SessionSwitchEventArgs e)
     {
-        if (e.Reason is SessionSwitchReason.SessionLock or SessionSwitchReason.ConsoleDisconnect or SessionSwitchReason.RemoteDisconnect)
+        if (e.Reason is not (SessionSwitchReason.SessionLock or SessionSwitchReason.ConsoleDisconnect or SessionSwitchReason.RemoteDisconnect))
+            return;
+
+        // Revoke before UI dispatch: a blocked UI thread must not keep a viewer authorized.
+        Interlocked.Increment(ref consentEpoch);
+        Volatile.Read(ref activeClient)?.Close();
+        try
+        {
             if (IsHandleCreated && !IsDisposed) BeginInvoke((Action)Stop);
+        }
+        catch (InvalidOperationException) { } // Window handle is closing.
     }
 
     private async Task AcceptLoop(TcpListener server, CancellationToken cancellation)
@@ -98,8 +107,10 @@ internal sealed class HostWindow : Form
                 activeClient = client;
                 try
                 {
-                    if (!await ApproveConnection(cancellation).ConfigureAwait(false)) continue;
-                    var authorizedEpoch = Volatile.Read(ref consentEpoch);
+                    var offeredEpoch = Volatile.Read(ref consentEpoch);
+                    if (!await ApproveConnection(cancellation).ConfigureAwait(false) ||
+                        Volatile.Read(ref consentEpoch) != offeredEpoch) continue;
+                    var authorizedEpoch = offeredEpoch;
                     using var session = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
                     session.CancelAfter(TimeSpan.FromMinutes(5));
                     await RfbSession.Run(client, session.Token,
