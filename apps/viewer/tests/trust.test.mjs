@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
-  TRUST_STORAGE_KEY, compareServerPin, forgetServerPin, readServerPin, rememberServerPin, trustedEndpoint,
+  TRUST_STORAGE_KEY, compareServerPin, forgetServerPin, readServerPin, rememberServerPin, requirePinnedIdentity, trustedEndpoint,
 } from '../src/trust.mjs';
 
 const A = Array.from({ length: 32 }, () => 'AA').join(':');
@@ -56,4 +56,11 @@ test('forgotten identity requires a new explicit approval before a different key
   assert.equal(readServerPin(local, 'vn2:5900'), null);
   rememberServerPin(local, 'vn2:5900', B);
   assert.equal(readServerPin(local, 'vn2:5900'), B);
+});
+
+test('an already pinned endpoint rejects a security downgrade without an RSA key challenge', () => {
+  assert.doesNotThrow(() => requirePinnedIdentity(null, null)); // Legacy first-use endpoint.
+  assert.doesNotThrow(() => requirePinnedIdentity(A, A));
+  assert.throws(() => requirePinnedIdentity(A, null), /Possible downgrade/);
+  assert.throws(() => requirePinnedIdentity(A, B), /changed key/);
 });
