@@ -21,8 +21,11 @@ Primary references: [Electron distribution](https://www.electronjs.org/docs/late
 [WebView2 distribution](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/distribution),
 [Tauri Windows prerequisites](https://v2.tauri.app/start/prerequisites/),
 [PWA installability](https://developer.mozilla.org/en-US/docs/Web/Progressive_web_apps/Guides/Making_PWAs_installable).
-Electron and its toolchain are MIT-licensed, but bundled Chromium, Node and
-transitive components have distinct notices and redistribution obligations.
+Electron's top-level license is MIT; `@electron/packager` 20.3.0 is
+**BSD-2-Clause**, and bundled Chromium, Node and transitive components have
+distinct notices and redistribution obligations. See [the exact Windows
+dependency audit](LICENSE_AUDIT.md) for lockfile metadata counts, source
+licenses and an actionable full-notice/SBOM release gate.
 UnboundVNC original code retains the repository's personal-use/commercial-rights
 license. A release needs a complete audited manifest and written redistribution
 authorization where required; free tooling does not erase those gates.
