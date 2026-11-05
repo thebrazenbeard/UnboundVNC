@@ -134,6 +134,28 @@ test('single-use WS ticket bridges RFB banner and masked binary payload', async 
   assert.match(replay.response, /^HTTP\/1\.1 403/);
 });
 
+test('abrupt downstream TCP close releases the upstream RFB socket', async t => {
+  const rfb = createTcpServer(socket => socket.write('RFB 003.008\n'));
+  await new Promise(resolve => rfb.listen(0, '127.0.0.1', resolve));
+  const upstreamAccepted = once(rfb, 'connection');
+  const gateway = createGateway({ port: 0, allowedPorts: [rfb.address().port] });
+  const url = await gateway.listen();
+  const ticket = await (await session({ url, origin: url, port: rfb.address().port })).json();
+  const client = await upgrade({ url, origin: url }, ticket.wsPath);
+  const [upstream] = await upstreamAccepted;
+  t.after(async () => {
+    client.socket.destroy();
+    upstream.destroy();
+    await gateway.close();
+    await new Promise(resolve => rfb.close(resolve));
+  });
+  assert.match(client.response, /^HTTP\/1\.1 101/);
+  assert.equal((await client.nextFrame()).toString(), 'RFB 003.008\n');
+  const upstreamClosed = once(upstream, 'close', { signal: AbortSignal.timeout(1500) });
+  client.socket.destroy(); // Abrupt network loss, not a masked WebSocket Close.
+  await upstreamClosed;
+});
+
 test('rejects cross-origin WS handshake without exposing consumed ticket', async t => {
   const f = await fixture(t);
   const ticket = await (await session(f)).json();
