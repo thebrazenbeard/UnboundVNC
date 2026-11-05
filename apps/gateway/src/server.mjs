@@ -2,6 +2,7 @@ import { createServer } from 'node:http';
 import { connect } from 'node:net';
 import { createHash, randomBytes } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
+import { performance } from 'node:perf_hooks';
 
 const MAX_BODY = 1024;
 const MAX_FRAME = 1024 * 1024;
@@ -9,6 +10,10 @@ const MAX_BUFFERED = MAX_FRAME + 14;
 // Control frames bypass upstream RFB backpressure. Do not allow a client that
 // sends Pings without reading Pongs to accumulate an unlimited write queue.
 const MAX_CONTROL_OUTBOUND = 256 * 1024;
+// Each of eight active sessions gets an independent budget. A peer that reads
+// Pongs can otherwise evade the write-queue ceiling while monopolizing CPU.
+const CONTROL_BURST = 64;
+const CONTROL_REFILL_PER_SECOND = 32;
 const TICKET_MS = 30_000;
 const HEARTBEAT_MS = 30_000;
 const MAX_SOCKETS = 8;
@@ -189,6 +194,8 @@ export function createGateway({ port = 6081, host = '127.0.0.1', allowedPorts = 
     let bufferStart = 0;
     let bufferEnd = 0;
     let fragment = false;
+    let controlTokens = CONTROL_BURST;
+    let lastControlAt = performance.now();
     let heartbeatTimer;
     let expectedPong = null;
     let closeTimer;
@@ -332,6 +339,18 @@ export function createGateway({ port = 6081, host = '127.0.0.1', allowedPorts = 
         if (opcode === 8) {
           if (!validClosePayload(payload)) return cleanup();
           return cleanup(payload);
+        }
+        const heartbeatPong = opcode === 10 && expectedPong?.equals(payload);
+        if (opcode === 9 || (opcode === 10 && !heartbeatPong)) {
+          // Include unsolicited Pongs; otherwise a flooding peer could simply
+          // switch from Ping to Pong to evade the same parsing/CPU budget.
+          // A matching response to our one outstanding heartbeat is exempt.
+          const now = performance.now();
+          controlTokens = Math.min(CONTROL_BURST, controlTokens +
+            Math.max(0, now - lastControlAt) * CONTROL_REFILL_PER_SECOND / 1000);
+          lastControlAt = now;
+          if (controlTokens < 1) return cleanup();
+          controlTokens -= 1;
         }
         if (opcode === 9) {
           const reply = frame(10, payload);
