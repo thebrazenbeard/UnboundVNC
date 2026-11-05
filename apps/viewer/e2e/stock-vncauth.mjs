@@ -149,10 +149,29 @@ async function run() {
         'VncAuth requires credentials before the remote session connects');
     }
 
+    // Cancellation is not submission. A previously typed VNC password must not
+    // linger in a hidden form or reappear on the next credential prompt. Never
+    // screenshot or trace a filled password field, including on test failure.
+    const blankPasswordControl = () => page.evaluate(() =>
+      document.querySelector('#credentials-form input[name="password"]').value.length === 0);
+    await quickConnect();
+    await page.locator('#credentials-form input[name="password"]').fill(credentials.password);
+    await page.keyboard.press('Escape');
+    assert.equal(await page.locator('#session-view').isVisible(), false,
+      'Escape from the credential modal must cancel the pending session');
+    assert.ok(await blankPasswordControl(), 'Escape cancel must erase the unsubmitted password from the DOM');
+
+    await quickConnect();
+    assert.ok(await blankPasswordControl(), 'a fresh VncAuth prompt must never show an abandoned password');
+    await page.locator('#credentials-form input[name="password"]').fill(credentials.password);
+    await page.locator('#credentials-cancel').click();
+    assert.equal(await page.locator('#session-view').isVisible(), false,
+      'explicit credential Disconnect must cancel the pending session');
+    assert.ok(await blankPasswordControl(), 'credential Disconnect must erase the unsubmitted password from the DOM');
+
     // Correct password path: real noVNC VncAuth, then independent stock RFB pixels.
     await quickConnect();
-    assert.equal(await page.locator('#credentials-form input[name="password"]').inputValue(), '',
-      'credential input starts empty');
+    assert.ok(await blankPasswordControl(), 'credential input starts empty after both cancellation paths');
     await page.screenshot({ path: path.join(evidenceDir, 'preauth-prompt-blank.png') });
     await page.locator('#credentials-form input[name="password"]').fill(credentials.password);
     await page.locator('#credentials-form button[type="submit"]').click();
