@@ -18,6 +18,14 @@ After opt-in, the test paints a uniquely colored, solid **test-owned form** on t
 
 This test-owned pixel and synthetic approval are **hosted runner RUNTIME_PROBE** evidence only. They cannot establish that a Patrick-owned Windows 10/11 host shows consent to a real person, safely revokes during a lock/UAC transition, handles physical multi-monitor capture, or grants secure remote control. RFB None remains strictly loopback-only; native keyboard/mouse control remains disabled.
 
+## Peer-bound remote consent draft — security model only, disabled
+
+The `PeerBoundConsentDraft` type compiles with the host but is **not connected to `HostWindow`, `ApproveConnection`, any RFB socket or any Tailscale service**. Its `RemoteRouteEnabled` constant is `false`, and `TryAuthorizeRealRemote` unconditionally denies, even if passed a plausible-looking fake peer. It adds a pure fake-evidence evaluator plus an interlocked, monotonic `HostRevocationEpoch` model for Windows Actions negative tests. The tests deliberately fabricate `FakeWhoIsVerified`, `FakeTlsServiceVerified` and `FakeHumanOperatorApproved`; these booleans are **not** verified Tailscale, TLS or human permission.
+
+The `tests/host-windows-peer-consent` checks require an exact node/session/host/TLS service binding, view-only scope, at most five-minute lease, current epoch, default input desktop and connected peer. They check missing or forged identity, control requests, expiry, Stop, simulated lock/secure desktop, disconnect and deterministic late-approval-after-revoke. **No actual Windows session is locked** and there is no production code path that can grant remote access from this draft.
+
+Before an enabled future route, a trusted local adapter must deliver socket-derived peer identity (e.g. a properly reviewed private Tailscale WhoIs/TLS implementation) to a redesigned host consent dialog; the operator must see that verified peer and approve the exact session/epoch. The actual HostWindow must enforce the gate before each frame, revoke on real Stop/lock/UAC/disconnect and pass adversarial interactive Windows tests. Until then, any remote-route or peer-consent integration must **fail closed**; a mock gate does not qualify secure remote desktop.
+
 ## Disabled local input policy spike
 
 `ExperimentalInputPolicy` models the bytes *after* RFB KeyEvent (7 bytes) and PointerEvent (5 bytes) message types, with exact-length, range, key mapping and coordinate checks. The limited keyboard set is ASCII printable characters, Backspace, Tab, Enter, Escape and arrow keys. It rejects modifier keys, unsupported X11 keysyms, noncanonical down flags, nonzero padding, oversized payloads, out-of-frame coordinates, arithmetic overflow and unsupported pointer button bits (wheel/extended buttons). This deliberately incomplete mapping is not yet suitable for generic RFB viewer input interoperability.
