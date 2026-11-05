@@ -231,6 +231,7 @@ async function run() {
     // Real same-origin document navigation fires pagehide. Verify the OLD
     // document discarded an unsubmitted credential before Chromium leaves it
     // (which may otherwise retain a DOM snapshot in the back/forward cache).
+    // The marker tests navigation cleanup, not browser password-manager behavior.
     // Only a Boolean-like marker crosses documents via window.name; never the
     // password, its length, a filled-input screenshot, or a Playwright trace.
     await quickConnect();
