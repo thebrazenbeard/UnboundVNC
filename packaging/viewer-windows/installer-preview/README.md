@@ -27,7 +27,7 @@ if quiescence cannot be demonstrated, uninstall and locked-root cleanup fail
 closed. Negative cases also require their *exact expected refusal reason*, so
 an incidental EXE lock cannot masquerade as an unknown-file or app.asar guard.
 The hosted test also acquires an exclusive handle on its own staged viewer EXE
-for three seconds in a bounded background thread: the transaction must refuse
+for three seconds in a bounded test-owned background PowerShell job: the transaction must refuse
 that exact EXE lock, and the passive quiescence check must wait for the handle
 to be released before proceeding. Final sandbox teardown independently checks
 every file handle; a locked file is preserved, even inside a disposable runner.

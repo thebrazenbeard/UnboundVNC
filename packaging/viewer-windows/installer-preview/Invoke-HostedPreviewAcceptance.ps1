@@ -93,9 +93,10 @@ function Wait-ForViewerQuiescence([string]$phase, [int[]]$ports) {
 }
 
 function Test-DeterministicHeldExeQuiescence {
-  Import-Module ThreadJob -ErrorAction Stop
   $ready = Join-Path $root '.owned-exe-lock-fixture-ready'
-  $job = Start-ThreadJob -ArgumentList @($exe,$ready) -ScriptBlock {
+  # Start-Job is built into the hosted pwsh image; ThreadJob is not installed.
+  # Its child pwsh is scoped to this one EXE handle and a bounded test duration.
+  $job = Start-Job -ArgumentList @($exe,$ready) -ScriptBlock {
     param([string]$ownedExe,[string]$receipt)
     $ErrorActionPreference = 'Stop'
     $hold = [IO.File]::Open($ownedExe, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
