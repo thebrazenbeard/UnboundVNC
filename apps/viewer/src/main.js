@@ -1,7 +1,7 @@
 import RFB from '@novnc/novnc';
 import { describeEndpoint, loadDevices, saveDevices, sortedDevices, validateDevice } from './devices.mjs';
 import { fingerprintServerKey } from './identity.mjs';
-import { compareServerPin, forgetServerPin, readServerPin, rememberServerPin, trustedEndpoint } from './trust.mjs';
+import { compareServerPin, forgetServerPin, readServerPin, rememberServerPin, requirePinnedIdentity, trustedEndpoint } from './trust.mjs';
 import './style.css';
 
 const app = document.querySelector('#app');
@@ -191,10 +191,14 @@ async function connectTo(device) {
   showSession(target);
   const connection = {
     device, target, rfb: null, manual: false, abortController: new AbortController(),
-    verificationReady: false, pendingFingerprint: null, identityChanged: false, verificationAttempt: 0,
+    verificationReady: false, pendingFingerprint: null, verifiedFingerprint: null,
+    identityChanged: false, verificationAttempt: 0,
   };
   state.connection = connection;
   try {
+    // Check storage before a network connection is started. A corrupt pin store
+    // cannot be bypassed by negotiating a weaker VNC security type.
+    readServerPin(window.localStorage, trustedEndpoint(target));
     const response = await fetch('/api/sessions', {
       method: 'POST', credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
@@ -214,7 +218,15 @@ async function connectTo(device) {
     rfb.viewOnly = false;
     rfb.addEventListener('connect', () => {
       if (state.connection !== connection) return;
-      document.querySelector('#session-status').textContent = 'Connected';
+      try {
+        requirePinnedIdentity(readServerPin(window.localStorage, trustedEndpoint(target)), connection.verifiedFingerprint);
+      } catch (error) {
+        disconnect();
+        notify(error.message, 'error');
+        return;
+      }
+      document.querySelector('#session-status').textContent = connection.verifiedFingerprint
+        ? 'Connected · RSA key verified' : 'Connected · identity unverified';
       if (device.id) {
         const stored = state.devices.find(d => d.id === device.id);
         if (stored) { stored.lastConnectedAt = Date.now(); persist(); renderDevices(); }
@@ -222,7 +234,15 @@ async function connectTo(device) {
       notify(`Connected to ${target.name}`, 'success');
     });
     rfb.addEventListener('credentialsrequired', () => {
-      if (state.connection === connection) document.querySelector('#credentials-dialog').showModal();
+      if (state.connection !== connection) return;
+      try {
+        requirePinnedIdentity(readServerPin(window.localStorage, trustedEndpoint(target)), connection.verifiedFingerprint);
+      } catch (error) {
+        disconnect();
+        notify(error.message, 'error');
+        return;
+      }
+      document.querySelector('#credentials-dialog').showModal();
     });
     rfb.addEventListener('serververification', async event => {
       if (state.connection !== connection) return;
@@ -242,6 +262,7 @@ async function connectTo(device) {
         const decision = compareServerPin(readServerPin(window.localStorage, endpoint), fingerprint);
         // No user interaction is required for a key already independently verified.
         if (decision === 'matching') {
+          connection.verifiedFingerprint = fingerprint;
           rfb.approveServer();
           return;
         }
@@ -384,6 +405,7 @@ document.getElementById('identity-approve').addEventListener('click', () => {
     notify(`Cannot establish remembered server identity: ${error.message}`, 'error');
     return;
   }
+  connection.verifiedFingerprint = connection.pendingFingerprint;
   closeDialog('identity-dialog');
   connection.rfb?.approveServer();
 });
