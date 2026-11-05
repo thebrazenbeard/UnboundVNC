@@ -17,10 +17,12 @@ internal static class Program
     private static readonly byte[] Version = Encoding.ASCII.GetBytes("RFB 003.008\n");
     private const int OracleWidth = 32;
     private const int OracleHeight = 24;
-    private static readonly Color[] Pattern =
+    private static readonly Color[][] VisualStates =
     {
-        Color.FromArgb(14, 171, 219), Color.FromArgb(219, 46, 88),
-        Color.FromArgb(73, 210, 45), Color.FromArgb(189, 83, 222)
+        new[] { Color.FromArgb(14, 171, 219), Color.FromArgb(219, 46, 88),
+            Color.FromArgb(73, 210, 45), Color.FromArgb(189, 83, 222) },
+        new[] { Color.FromArgb(248, 169, 44), Color.FromArgb(54, 93, 236),
+            Color.FromArgb(20, 194, 172), Color.FromArgb(240, 55, 125) }
     };
 
     [STAThread]
@@ -57,10 +59,11 @@ internal static class Program
                 Size = new Size(100, 80)
             };
             int paintCallbacks = 0;
+            Color[] activePattern = VisualStates[0];
             marker.Paint += (_, e) =>
             {
                 paintCallbacks++;
-                PaintFourColorWindow(e.Graphics, marker.ClientSize);
+                PaintFourColorWindow(e.Graphics, marker.ClientSize, activePattern);
             };
             marker.Show();
             marker.Activate();
@@ -88,7 +91,7 @@ internal static class Program
                 {
                     marker.Refresh(); // No WinForms message pump runs while this STA polls.
                     oracle = CaptureAndValidatePattern(bounds.Left + x - OracleWidth / 2,
-                        bounds.Top + y - OracleHeight / 2, quadrantMatches);
+                        bounds.Top + y - OracleHeight / 2, quadrantMatches, activePattern);
                     return true;
                 }
                 catch (Exception ex) { captureFailureType = ex.GetType().Name; return false; }
@@ -105,6 +108,7 @@ internal static class Program
                 Console.WriteLine($"OWNED_WINDOW_CAPTURE_FAILURE_TYPE={captureFailureType}");
             }
             Require(oracleReady && oracle is not null, "TEST_OWNED_WINDOW_PATTERN_ORACLE_MISMATCH");
+            byte[] firstOracle = oracle!;
             Console.WriteLine("TEST_OWNED_32x24_MULTICOLOR_WINDOW_ORACLE=PASS");
 
             Process? host = null;
@@ -136,14 +140,46 @@ internal static class Program
                 ClickOwnedButton(host!, dialog, "Approve");
                 Console.WriteLine("CONSENT_CLICK=SYNTHETIC_CI_APPROVE");
 
-                ValidateRawPattern(stream, x - OracleWidth / 2, y - OracleHeight / 2,
-                    frameWidth, frameHeight, oracle!);
-                Console.WriteLine("RFB_3_8_RAW_TEST_OWNED_32x24_WINDOW=PASS");
+                NegotiateRfbViewOnly(stream, frameWidth, frameHeight);
+                int regionX = x - OracleWidth / 2, regionY = y - OracleHeight / 2;
+                ValidateRawPatternRequest(stream, regionX, regionY, firstOracle);
+                Console.WriteLine("RFB_3_8_RAW_TEST_OWNED_32x24_WINDOW_STATE_A=PASS");
+
+                // Same host process, same approved RFB session, same rectangle.
+                // A real test-owned window repaints; no client reconnect occurs.
+                activePattern = VisualStates[1];
+                marker.Refresh();
+                byte[]? secondOracle = null;
+                bool secondReady = WaitUntil(() =>
+                {
+                    try
+                    {
+                        marker.Refresh();
+                        secondOracle = CaptureAndValidatePattern(bounds.Left + regionX,
+                            bounds.Top + regionY, quadrantMatches, activePattern);
+                        return true;
+                    }
+                    catch { return false; }
+                }, TimeSpan.FromSeconds(3));
+                Require(secondReady && secondOracle is not null, "SECOND_WINDOW_STATE_ORACLE_MISMATCH");
+                byte[] second = secondOracle!;
+                int changedPixels = 0;
+                for (int i = 0; i < OracleWidth * OracleHeight; i++)
+                    if (firstOracle[i * 3] != second[i * 3] ||
+                        firstOracle[i * 3 + 1] != second[i * 3 + 1] ||
+                        firstOracle[i * 3 + 2] != second[i * 3 + 2]) changedPixels++;
+                Require(changedPixels == OracleWidth * OracleHeight, "SECOND_WINDOW_STATE_NOT_CHANGED");
+                Console.WriteLine("SECOND_TEST_OWNED_32x24_MULTICOLOR_WINDOW_ORACLE=PASS");
+
+                ValidateRawPatternRequest(stream, regionX, regionY, second);
+                Console.WriteLine("SAME_RFB_SESSION_SECOND_RAW_32x24_CHANGED_PIXELS=PASS");
 
                 ClickOwnedButton(host!, window, "Stop and revoke");
                 Require(WaitUntil(() => !IsPort5901Listening(), TimeSpan.FromSeconds(5)),
                     "LISTENER_STILL_OPEN_AFTER_STOP");
-                Require(PeerClosedAfterStop(stream), "RFB_PEER_STILL_OPEN_AFTER_STOP");
+                Require(NoFramebufferAfterStop(stream, regionX, regionY),
+                    "POST_STOP_RFB_FRAME_OR_OPEN_PEER");
+                Console.WriteLine("POST_STOP_FRAMEBUFFER_REQUEST_DENIED=PASS");
                 Console.WriteLine("STOP_REVOKES_SESSION_AND_LISTENER=PASS");
                 Console.WriteLine("HOSTED_RFB=PASS_SYNTHETIC_CI_VIEW_ONLY");
                 return 0;
@@ -209,7 +245,7 @@ internal static class Program
         return okay;
     }
 
-    private static void PaintFourColorWindow(Graphics graphics, Size size)
+    private static void PaintFourColorWindow(Graphics graphics, Size size, Color[] pattern)
     {
         int halfWidth = size.Width / 2, halfHeight = size.Height / 2;
         var quadrants = new[]
@@ -219,14 +255,15 @@ internal static class Program
             new Rectangle(0, halfHeight, halfWidth, size.Height - halfHeight),
             new Rectangle(halfWidth, halfHeight, size.Width - halfWidth, size.Height - halfHeight)
         };
-        for (int i = 0; i < Pattern.Length; i++)
+        for (int i = 0; i < pattern.Length; i++)
         {
-            using var brush = new SolidBrush(Pattern[i]);
+            using var brush = new SolidBrush(pattern[i]);
             graphics.FillRectangle(brush, quadrants[i]);
         }
     }
 
-    private static byte[] CaptureAndValidatePattern(int screenX, int screenY, int[] quadrantMatches)
+    private static byte[] CaptureAndValidatePattern(int screenX, int screenY,
+        int[] quadrantMatches, Color[] pattern)
     {
         Array.Clear(quadrantMatches);
         using var bitmap = new Bitmap(OracleWidth, OracleHeight);
@@ -239,7 +276,7 @@ internal static class Program
         {
             int quadrant = (y < OracleHeight / 2 ? 0 : 2) +
                 (x < OracleWidth / 2 ? 0 : 1);
-            Color expected = Pattern[quadrant];
+            Color expected = pattern[quadrant];
             Color actual = bitmap.GetPixel(x, y);
             if (actual.R == expected.R && actual.G == expected.G && actual.B == expected.B)
                 quadrantMatches[quadrant]++;
@@ -253,10 +290,9 @@ internal static class Program
         return oracle;
     }
 
-    private static void ValidateRawPattern(NetworkStream stream, int x, int y,
-        int maximumWidth, int maximumHeight, byte[] oracle)
+    private static void NegotiateRfbViewOnly(NetworkStream stream,
+        int maximumWidth, int maximumHeight)
     {
-        Require(oracle.Length == OracleWidth * OracleHeight * 3, "BAD_TEST_ORACLE_LENGTH");
         var version = ReadExact(stream, 12);
         Require(version.SequenceEqual(Version), "WRONG_RFB_VERSION");
         stream.Write(Version);
@@ -275,7 +311,11 @@ internal static class Program
         uint nameLength = BinaryPrimitives.ReadUInt32BigEndian(ReadExact(stream, 4));
         Require(nameLength <= 512, "UNBOUNDED_RFB_NAME");
         _ = ReadExact(stream, (int)nameLength);
+    }
 
+    private static void ValidateRawPatternRequest(NetworkStream stream, int x, int y, byte[] oracle)
+    {
+        Require(oracle.Length == OracleWidth * OracleHeight * 3, "BAD_TEST_ORACLE_LENGTH");
         byte[] request = { 3, 0, (byte)(x >> 8), (byte)x, (byte)(y >> 8), (byte)y,
             0, OracleWidth, 0, OracleHeight };
         stream.Write(request);
@@ -310,6 +350,18 @@ internal static class Program
         catch (IOException ex) when (ex.InnerException is SocketException socket &&
             socket.SocketErrorCode is SocketError.ConnectionReset or SocketError.ConnectionAborted)
         { return true; }
+    }
+
+    private static bool NoFramebufferAfterStop(NetworkStream stream, int x, int y)
+    {
+        // New full update requested only AFTER Stop has closed its listener.
+        // Success requires a peer-close/reset, never a buffered Raw frame byte.
+        byte[] request = { 3, 0, (byte)(x >> 8), (byte)x, (byte)(y >> 8), (byte)y,
+            0, OracleWidth, 0, OracleHeight };
+        try { stream.Write(request); }
+        catch (IOException) { return true; } // Closed TCP stream cannot accept a frame.
+        catch (ObjectDisposedException) { return true; }
+        return PeerClosedAfterStop(stream);
     }
 
     private static bool IsPort5901Listening() =>
