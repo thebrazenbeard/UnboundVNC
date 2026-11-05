@@ -1,0 +1,24 @@
+name: RFB 3.3-3.8 synthetic negotiation (loopback)
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/rfb-legacy-negotiation.yml'
+      - 'tests/interop/**'
+      - 'tests/integration/gateway-rfb.test.mjs'
+      - 'apps/gateway/src/server.mjs'
+
+permissions:
+  contents: read
+
+jobs:
+  legacy-negotiation:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Test byte-exact RFB 3.3, 3.7, 3.8 handshakes and Raw framebuffer over local gateway
+        run: node --test tests/interop/fixture.test.mjs tests/integration/gateway-rfb.test.mjs
