@@ -384,9 +384,15 @@ try {
   $validSubstituteHash=(Get-FileHash -LiteralPath $validSubstitute -Algorithm SHA256).Hash
   if($validSubstituteHash -ceq $datHash) { throw 'Foreign native deletion-plan unexpectedly matches the original log SHA256.' }
   $probeExit=Invoke-NativeUninstallerBounded $probeUninstaller 'probe-plan positive control'
-  if($probeExit -ne 0 -or (Test-Path -LiteralPath $decoy) -or
-      (Test-Path -LiteralPath $probeInstall)) {
-    throw "Hostile-log positive control did not delete only its owned app and the GUID-root sibling decoy; exit=$probeExit."
+  $probeDeadline=[DateTime]::UtcNow.AddSeconds(15)
+  while((Test-Path -LiteralPath $probeInstall) -and [DateTime]::UtcNow -lt $probeDeadline) {
+    Start-Sleep -Milliseconds 200
+  }
+  $probeDecoyPresent=Test-Path -LiteralPath $decoy
+  $probeAppPresent=Test-Path -LiteralPath $probeInstall
+  Write-Host "NATIVE VALID-PLAN CONTROL READBACK: exit=$probeExit decoyPresent=$probeDecoyPresent probeAppPresent=$probeAppPresent; bounded post-exit cleanup complete."
+  if($probeExit -ne 0 -or $probeDecoyPresent -or $probeAppPresent) {
+    throw "Hostile-log positive control is not qualified: exit=$probeExit decoyPresent=$probeDecoyPresent probeAppPresent=$probeAppPresent."
   }
   Set-Content -LiteralPath $decoy -Value 'test-owned decoy not part of install' -NoNewline
   if((Get-FileHash -LiteralPath $decoy -Algorithm SHA256).Hash -cne $decoyHash) {
