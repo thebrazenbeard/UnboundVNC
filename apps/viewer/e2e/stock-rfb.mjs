@@ -188,6 +188,14 @@ async function run() {
     await page.locator('#session-scale').click();
     assert.equal(await page.locator('#session-scale').getAttribute('aria-pressed'), 'true');
     await waitForMetrics(page, 'desktop-fit', 'restored fit');
+    const mobileToolbarNames = [
+      { id: 'session-viewonly', name: 'View only' },
+      { id: 'session-fullscreen', name: 'Fullscreen' },
+      { id: 'session-disconnect', name: 'Disconnect' },
+    ];
+    const desktopToolbar = await Promise.all(mobileToolbarNames.map(async control => ({
+      ...control, accessibilitySnapshot: await page.locator(`#${control.id}`).ariaSnapshot(),
+    })));
 
     // At mobile widths the text span inside toolbar buttons is display:none.
     // A nameless Fit screen button is a real accessibility/resize defect.
@@ -195,6 +203,18 @@ async function run() {
     const mobileFit = await waitForMetrics(page, 'mobile-fit', 'responsive fit');
     assert.equal(await page.getByRole('button', { name: 'Fit screen' }).isVisible(), true,
       'Fit screen must retain an accessible button name when text is hidden on mobile');
+    const mobileToolbar = await Promise.all(mobileToolbarNames.map(async control => ({
+      ...control, accessibilitySnapshot: await page.locator(`#${control.id}`).ariaSnapshot(),
+      stableAccessibleName: await page.getByRole('button', { name: control.name, exact: true }).count() === 1,
+    })));
+    await writeFile(path.join(evidenceDir, 'mobile-toolbar-accessibility.json'),
+      JSON.stringify({ desktopToolbar, mobileToolbar }, null, 2));
+    assert.deepEqual(mobileToolbar.map(control => control.stableAccessibleName), [true, true, true],
+      'View only, Fullscreen and Disconnect must retain their exact desktop accessible names on mobile');
+    await page.getByRole('button', { name: 'View only', exact: true }).click();
+    assert.equal(await page.locator('#session-viewonly').getAttribute('aria-pressed'), 'true',
+      'mobile accessible-name fix must preserve View only activation');
+    await page.getByRole('button', { name: 'View only', exact: true }).click();
     assert.equal(await page.locator('#session-viewonly').getAttribute('aria-pressed'), 'false',
       'scaling and viewport resize must not switch input into view-only');
 
@@ -253,7 +273,7 @@ async function run() {
       unexpectedDisconnectBanner: true, retryConnected: true,
       noCredentialLikeBrowserStorage: true, viewOnlyPreserved: true,
     }, null, 2));
-    await page.locator('#session-disconnect').click();
+    await page.getByRole('button', { name: 'Disconnect', exact: true }).click();
     assert.equal(await page.locator('#session-view').isVisible(), false, 'disconnect returns to dashboard');
     assert.equal(await page.locator('#connection-error').isVisible(), false,
       'explicit user Disconnect must not be misclassified as remote session failure');

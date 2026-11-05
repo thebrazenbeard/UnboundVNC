@@ -62,6 +62,15 @@ noVNC can report `clean: true` on a server-initiated socket close; that is
 shows the retry banner, whereas the explicit Disconnect button does not.
 No automatic reconnection, host access or encrypted transport is implied.
 
+The stock-RFB browser test also records real Playwright accessible-name
+snapshots for the connected **View only**, **Fullscreen** and **Disconnect**
+buttons before/after its 390px viewport resize, uploaded as
+`mobile-toolbar-accessibility.json`. The browser demonstrated that Fullscreen
+already retains its name via `title`, while View only previously changed its
+name to an action tooltip and Disconnect became unnamed when CSS hid their
+visible text. Explicit names now keep those controls stable across widths;
+no viewer input permission or view-only behavior is altered.
+
 ## Stock VncAuth browser qualification (disposable password)
 
 The separate `Stock TigerVNC VncAuth Chromium (loopback)` job runs
