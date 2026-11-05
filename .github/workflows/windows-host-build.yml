@@ -1,0 +1,32 @@
+name: Windows host compile qualification
+
+on:
+  pull_request:
+    paths:
+      - 'apps/host-windows/**'
+      - '.github/workflows/windows-host-build.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compile-windows-host:
+    name: .NET 8 Windows host compile (source/build only)
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - name: Checkout PR source
+        uses: actions/checkout@v4
+      - name: Setup .NET 8 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Restore
+        run: dotnet restore apps/host-windows/UnboundVnc.Host.Windows.csproj
+      - name: Build Release
+        run: dotnet build apps/host-windows/UnboundVnc.Host.Windows.csproj --configuration Release --no-restore
+      - name: State qualification boundary
+        shell: pwsh
+        run: |
+          Write-Host "BUILD evidence only: no interactive desktop, installed host, consent check, input, encrypted transport, or cross-machine remote session was tested."
