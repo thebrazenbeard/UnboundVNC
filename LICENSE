@@ -1,0 +1,95 @@
+UNBOUNDVNC PERSONAL AND COMMERCIAL LICENSE
+Version 1.0 — 2026-11-05
+
+Copyright (c) 2026 Patrick Sims. All rights reserved.
+
+1. SCOPE AND OWNERSHIP
+This license applies only to original UnboundVNC software, documentation, and
+other copyrightable material owned by Patrick Sims (the "Licensed Material").
+It does not replace, sublicense, or restrict licenses for third-party code or
+assets. Those components remain available under their respective terms.
+
+2. FREE PERSONAL-USE LICENSE
+Subject to this license, the copyright holder grants each individual a
+non-exclusive, worldwide, royalty-free license to download, install, run,
+inspect, and make reasonable backup copies of the Licensed Material for
+Personal Use on an unlimited number of personally controlled devices. Private
+modifications for Personal Use, education, security research, and evaluation
+are also permitted.
+
+"Personal Use" means use by an individual for personal, household, hobby,
+educational, research, or unpaid assistance purposes that are not conducted
+for a Commercial Purpose. Helping friends or family without compensation or
+business benefit is Personal Use. No account, personal-use device limit, or
+license fee is imposed by this copyright license.
+
+This grant does not include public redistribution or publication of modified
+versions, commercial exploitation, sublicensing, or offering the Licensed
+Material as a hosted service to third parties. Those acts require separate
+written permission unless independently permitted by another applicable
+license. Notices of copyright and license must be retained.
+
+3. COMMERCIAL USE REQUIRES WRITTEN PERMISSION
+No commercial rights to the Licensed Material are granted under Section 2.
+"Commercial Purpose" means use in connection with the operations or economic
+benefit of a for-profit business, paid professional activity, revenue-producing
+service, commercial product, resale, or commercially managed deployment. It
+includes internal business remote support even when remote-access service is
+not itself sold. Earning income wholly unrelated to personal use of the
+software does not, by itself, turn that personal use into commercial use.
+
+A separate written commercial license from the copyright holder is required
+before a Commercial Purpose, including commercial hosting, integration,
+redistribution, sublicensing, or monetized derivatives. Terms, fees, scope,
+and duration are determined by that separate agreement. See
+COMMERCIAL_LICENSE.md. Availability of source does not imply commercial
+permission.
+
+4. REDISTRIBUTION AND DERIVATIVES
+Except for rights independently required by GitHub's Terms of Service or
+granted by an applicable third-party license, this license does not permit
+public redistribution, publishing modified releases, or sublicensing the
+Licensed Material. The right to inspect and privately modify source is not
+permission to distribute a derivative work. Obtain written permission first.
+
+5. THIRD-PARTY MATERIAL
+All third-party libraries, frameworks, codecs, protocols, fonts, images, and
+other components retain their own licenses and notices. Nothing in this
+license restricts the independent rights granted by those licenses, including
+rights to commercial use, copying, modification, or redistribution. When
+terms differ, the third-party license controls the relevant third-party
+material. See THIRD_PARTY_NOTICES.md and actual distribution manifests.
+
+6. CONTRIBUTIONS
+Submission of code or other contributions does not change the license of
+existing material. Any contribution terms, including permissions needed for
+commercial licensing, must be established explicitly before accepting
+contributions; no contributor assignment or license grant is implied here.
+
+7. MACHINE LEARNING AND DATASET USE
+No permission is granted to use original Licensed Material for training or
+fine-tuning a commercial model, constructing a commercial code dataset, or
+other commercial machine-learning exploitation without separate written
+permission. This restriction does not apply to third-party material licensed
+to permit those activities.
+
+8. NAMES AND PATENTS
+No rights to trademarks, product names, logos, or patents are granted beyond
+those independently required by applicable law or a separate agreement.
+
+9. TERMINATION
+The rights granted here terminate upon material breach of this license.
+Termination does not revoke rights lawfully received under an independent
+third-party license or rights validly granted by an earlier version.
+
+10. DISCLAIMER AND LIMITATION OF LIABILITY
+THE LICENSED MATERIAL IS PROVIDED "AS IS," WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE, TITLE, OR NON-INFRINGEMENT. TO THE MAXIMUM EXTENT
+PERMITTED BY LAW, THE COPYRIGHT HOLDER IS NOT LIABLE FOR DAMAGES OR CLAIMS
+ARISING FROM USE OF THE LICENSED MATERIAL.
+
+11. PRIOR GRANTS
+This license applies prospectively. It does not retroactively revoke
+permissions already validly granted under earlier versions or separate
+written agreements.
