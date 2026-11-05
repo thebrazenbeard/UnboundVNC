@@ -92,7 +92,7 @@ app.innerHTML = `
   <section id="session-view" class="session-view" aria-label="Remote desktop session" hidden>
     <div class="session-topbar"><div class="session-identity"><span class="session-online-dot"></span><div><strong id="session-name">Remote session</strong><small id="session-address"></small></div></div>
       <span id="session-status" class="session-status" role="status" aria-live="polite">Connecting…</span>
-      <div class="session-actions"><button id="session-viewonly" class="session-action" type="button" aria-pressed="false" title="Disable local keyboard and mouse input">${glyph.eye}<span>View only</span></button><button id="session-scale" class="session-action active" type="button" aria-pressed="true" title="Fit remote display to window">${glyph.expand}<span>Fit screen</span></button><button id="session-fullscreen" class="session-action" type="button" title="Fullscreen">${glyph.maximize}<span>Fullscreen</span></button><button id="session-disconnect" class="session-action disconnect" type="button">${glyph.close}<span>Disconnect</span></button></div>
+      <div class="session-actions"><button id="session-viewonly" class="session-action" type="button" aria-pressed="false" title="Disable local keyboard and mouse input">${glyph.eye}<span>View only</span></button><button id="session-scale" class="session-action active" type="button" aria-pressed="true" title="Fit remote display to window">${glyph.expand}<span>Fit screen</span></button><button id="session-fullscreen" class="session-action" type="button" title="Fullscreen">${glyph.maximize}<span>Fullscreen</span></button><button id="session-disconnect" class="session-action disconnect" type="button">${glyph.close}<span>Disconnect</span></button><button id="session-focus-remote" class="session-action" type="button" aria-label="Focus remote desktop" title="Return keyboard to remote desktop" disabled>${glyph.monitor}<span>Focus remote</span></button></div>
     </div><div id="session-stage" class="session-stage"><div id="remote-screen" aria-label="Remote desktop framebuffer"></div></div>
     <div class="session-footnote">Ctrl+Alt+Shift+Escape returns keyboard focus from the remote canvas to session controls. View-only is a viewer control, not host-side authorization. Gateway-to-host traffic may not be encrypted.</div>
   </section>
@@ -183,6 +183,7 @@ function showSession(device) {
   document.body.classList.add('session-active');
   document.querySelector('#session-disconnect').focus({ preventScroll: true });
   document.querySelector('#session-viewonly').classList.remove('active');
+  document.querySelector('#session-focus-remote').disabled = true;
   document.querySelector('#session-viewonly').setAttribute('aria-pressed', 'false');
   document.querySelector('#session-scale').classList.add('active');
   document.querySelector('#session-scale').setAttribute('aria-pressed', 'true');
@@ -195,6 +196,7 @@ function hideSession() {
   document.querySelector('.application').inert = false;
   document.body.classList.remove('session-active');
   document.querySelector('#remote-screen').replaceChildren();
+  document.querySelector('#session-focus-remote').disabled = true;
   closeDialog('credentials-dialog');
   closeDialog('identity-dialog');
   document.querySelector('#identity-approve').disabled = true;
@@ -262,6 +264,7 @@ async function connectTo(device) {
       }
       document.querySelector('#session-status').textContent = connection.verifiedFingerprint
         ? 'Connected · RSA key verified' : 'Connected · identity unverified';
+      document.querySelector('#session-focus-remote').disabled = false;
       rfb.focus({ preventScroll: true });
       if (device.id) {
         const stored = state.devices.find(d => d.id === device.id);
@@ -415,6 +418,9 @@ document.addEventListener('keydown', event => {
   document.getElementById('session-disconnect').focus({ preventScroll: true });
 }, true);
 document.getElementById('session-disconnect').addEventListener('click', () => { disconnect(); notify('Disconnected.'); });
+document.getElementById('session-focus-remote').addEventListener('click', () => {
+  state.connection?.rfb?.focus({ preventScroll: true });
+});
 document.getElementById('session-viewonly').addEventListener('click', event => {
   const rfb = state.connection?.rfb;
   if (!rfb) return;
