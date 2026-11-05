@@ -340,9 +340,11 @@ export function createGateway({ port = 6081, host = '127.0.0.1', allowedPorts = 
           if (!validClosePayload(payload)) return cleanup();
           return cleanup(payload);
         }
-        if (opcode === 9 || opcode === 10) {
+        const heartbeatPong = opcode === 10 && expectedPong?.equals(payload);
+        if (opcode === 9 || (opcode === 10 && !heartbeatPong)) {
           // Include unsolicited Pongs; otherwise a flooding peer could simply
           // switch from Ping to Pong to evade the same parsing/CPU budget.
+          // A matching response to our one outstanding heartbeat is exempt.
           const now = performance.now();
           controlTokens = Math.min(CONTROL_BURST, controlTokens +
             Math.max(0, now - lastControlAt) * CONTROL_REFILL_PER_SECOND / 1000);

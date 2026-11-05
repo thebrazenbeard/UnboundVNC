@@ -667,6 +667,36 @@ test('a routine burst of 32 masked Pings keeps its RFB session and exact Pong pa
   assert.equal((await connected.nextFrame()).toString(), 'normal RFB after burst');
 });
 
+test('matching heartbeat Pong remains valid after a full routine control burst', async t => {
+  const f = await fixture(t, { heartbeatMs: 100 });
+  const ticket = await (await session(f)).json();
+  const connected = await upgrade(f, ticket.wsPath);
+  t.after(() => connected.socket.destroy());
+  assert.equal((await connected.nextFrame()).toString(), 'RFB 003.008\n');
+  const challenge = await connected.nextPacket();
+  assert.equal(challenge.opcode, 9);
+  const burst = Array.from({ length: 64 }, (_, i) => Buffer.from(`burst-${i}`));
+  // Same TCP write: consume all 64 routine Ping tokens, then answer the
+  // gateway's one outstanding heartbeat challenge without a refill window.
+  connected.socket.write(Buffer.concat([
+    ...burst.map(payload => maskedFrame(payload, 9)),
+    maskedFrame(challenge.body, 10),
+  ]));
+  for (const payload of burst) {
+    const pong = await connected.nextPacket();
+    assert.equal(pong.opcode, 10);
+    assert.deepEqual(pong.body, payload);
+  }
+  connected.socket.write(maskedBinary('heartbeat and RFB alive'));
+  let echoed = false;
+  for (let i = 0; i < 5 && !echoed; i++) {
+    const packet = await connected.nextPacket();
+    if (packet.opcode === 9) connected.socket.write(maskedFrame(packet.body, 10));
+    else if (packet.opcode === 2) echoed = packet.body.toString() === 'heartbeat and RFB alive';
+  }
+  assert.equal(echoed, true, 'legitimate heartbeat Pong was rejected after the 64-Ping burst');
+});
+
 test('unsolicited masked Pong flood cannot evade per-session control budget', async t => {
   const f = await fixture(t);
   const ticket = await (await session(f)).json();
