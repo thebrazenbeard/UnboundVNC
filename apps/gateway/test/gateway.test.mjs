@@ -488,3 +488,81 @@ test('sustained RFB traffic can exceed 64 MiB without lifetime-byte disconnect',
   assert.equal(received, TARGET);
   assert.equal(connected.socket.destroyed, false);
 });
+
+test('a browser that never reads propagates bounded outbound backpressure and times out', async t => {
+  const CHUNK = 64 * 1024;
+  const MAX_OFFERED = 96 * 1024 * 1024;
+  const data = Buffer.alloc(CHUNK, 0x4a);
+  let offered = 0;
+  let producerBlocked = false;
+  const rfb = createTcpServer(socket => {
+    socket.on('error', () => {});
+    socket.write('RFB 003.008\n');
+    socket.once('data', () => {
+      function pump() {
+        if (socket.destroyed || producerBlocked) return;
+        // Yield after a bounded batch; never make the fixture itself an
+        // unbounded writable queue when testing the gateway's backpressure.
+        for (let i = 0; i < 16 && offered < MAX_OFFERED; i++) {
+          offered += data.length;
+          if (!socket.write(data)) { producerBlocked = true; return; }
+        }
+        if (offered < MAX_OFFERED) setImmediate(pump);
+      }
+      socket.on('drain', () => { producerBlocked = false; setImmediate(pump); });
+      pump();
+    });
+  });
+  await new Promise(resolve => rfb.listen(0, '127.0.0.1', resolve));
+  const gateway = createGateway({ port: 0, allowedPorts: [rfb.address().port], heartbeatMs: 2000 });
+  const url = await gateway.listen();
+  const ticket = await (await session({ url, origin: url, port: rfb.address().port })).json();
+  const gatewayIncoming = once(gateway.server, 'connection');
+  const upstreamIncoming = once(rfb, 'connection');
+  const connected = await upgrade({ url, origin: url }, ticket.wsPath);
+  const [ws] = await gatewayIncoming;
+  const [upstream] = await upstreamIncoming;
+  t.after(async () => {
+    connected.socket.destroy();
+    upstream.destroy();
+    await gateway.close();
+    await new Promise(resolve => rfb.close(resolve));
+  });
+  assert.equal((await connected.nextFrame()).toString(), 'RFB 003.008\n');
+  connected.socket.pause();
+  const initialRss = process.memoryUsage().rss;
+  connected.socket.write(maskedBinary('flood'));
+  const started = Date.now();
+  while (!(ws.writableLength > 0 && producerBlocked) && Date.now() - started < 1500) {
+    await new Promise(resolve => setTimeout(resolve, 15));
+  }
+  assert.ok(ws.writableLength > 0, `WebSocket never backpressured; offered=${offered}`);
+  assert.equal(producerBlocked, true, 'upstream writer did not experience propagated TCP backpressure');
+  const pausedAt = offered;
+  const queueAt = ws.writableLength;
+  await new Promise(resolve => setTimeout(resolve, 200));
+  const queueAfter = ws.writableLength;
+  const offeredDelta = offered - pausedAt;
+  const rssGrowth = process.memoryUsage().rss - initialRss;
+  t.diagnostic(`slow-reader: offered=${offered}B; after-stall-feed=${offeredDelta}B; wsQueue=${queueAt}/${queueAfter}B; rssGrowth=${rssGrowth}B`);
+  assert.ok(offeredDelta <= CHUNK * 2, `upstream continued flooding after stall: ${offeredDelta}B`);
+  assert.ok(queueAfter <= CHUNK * 8, `unbounded WebSocket writable queue: ${queueAfter}B`);
+  assert.ok(rssGrowth < 32 * 1024 * 1024, `unbounded RSS growth: ${rssGrowth}B`);
+  function waitForClose(socket) {
+    if (socket.destroyed) return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('slow-reader socket not closed after heartbeat timeout')), 5000);
+      socket.once('close', () => { clearTimeout(timer); resolve(); });
+    });
+  }
+  const wsClosed = waitForClose(ws);
+  const upstreamClosed = waitForClose(upstream);
+  await Promise.all([wsClosed, upstreamClosed]);
+  // A timed-out reader must relinquish its admission slot. The next ticket
+  // must complete a real WebSocket/RFB handshake, not just return HTTP 201.
+  const replacement = await (await session({ url, origin: url, port: rfb.address().port })).json();
+  const recovered = await upgrade({ url, origin: url }, replacement.wsPath);
+  t.after(() => recovered.socket.destroy());
+  assert.match(recovered.response, /^HTTP\/1\.1 101/);
+  assert.equal((await recovered.nextFrame()).toString(), 'RFB 003.008\n');
+});
