@@ -48,6 +48,17 @@ The fixture requests `SecurityTypes=None` solely for its explicit IPv4
 authenticated, consented or authorized network access to a workstation.
 Neither the RFB listener nor the gateway is published or deployed.
 
+The same hosted stock-RFB test additionally checks genuine Chromium canvas
+geometry for Fit screen → 1:1 → Fit screen, live resize to a 390px viewport,
+and the **accessible name** of the mobile Fit screen control. It then shuts
+down the throwaway stock server without the viewer disconnecting, verifies a
+persistent unexpected-disconnect banner, starts a new 640×360 stock X11 server
+on the same loopback RFB port, and exercises the visible Retry connection
+button. The replacement framebuffer pixels, mobile layout, reset view-only
+state and absence of stored credentials are asserted and captured as
+`stock-rfb-reconnected-mobile.png` and `resize-reconnect-result.json`.
+No automatic reconnection, host access or encrypted transport is implied.
+
 ## Stock VncAuth browser qualification (disposable password)
 
 The separate `Stock TigerVNC VncAuth Chromium (loopback)` job runs
