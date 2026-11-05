@@ -29,3 +29,5 @@ jobs:
         env:
           RFB_STOCK_INTEROP: '1'
         run: node --test tests/integration/stock-tigervnc.test.mjs
+      - name: Run gateway disconnect and transport regressions
+        run: node --test apps/gateway/test/gateway.test.mjs
