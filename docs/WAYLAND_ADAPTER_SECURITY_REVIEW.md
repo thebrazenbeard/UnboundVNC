@@ -6,7 +6,12 @@
 
 ## Key decision
 
-Use a **portal-mediated session first**: XDG RemoteDesktop `CreateSession` → `SelectDevices` (when control requested) → ScreenCast `SelectSources` (when viewing requested) → RemoteDesktop `Start` (user selection/grants) → PipeWire video and, if granted, `ConnectToEIS`/libei input. The compositor/portal owns OS-level authorization; UnboundVNC still owns *separate* viewer identity, host consent, capability gating, transport security, session expiry and revocation. An advertised Wayland global, usable X11 display, RFB password, portal restore token or network connection **does not** grant those UnboundVNC permissions.
+Use a **portal-mediated session first**, with distinct lifecycle paths:
+
+- **View-only:** `ScreenCast.CreateSession` → `SelectSources` → `ScreenCast.Start` (user selection) → `OpenPipeWireRemote` for approved pixels. No `RemoteDesktop` session or virtual input device is required.
+- **Control with optional capture:** `RemoteDesktop.CreateSession` → `SelectDevices` (requested device types) → optional `ScreenCast.SelectSources` on that *same* session → `RemoteDesktop.Start` (user grants) → optional `ScreenCast.OpenPipeWireRemote` and, **only if input was granted**, `ConnectToEIS`/libei. The combined session must be started and stopped via `RemoteDesktop`, and persistence is managed there, not through ScreenCast options.
+
+The compositor/portal owns OS-level authorization; UnboundVNC still owns *separate* viewer identity, host consent, capability gating, transport security, session expiry and revocation. An advertised Wayland global, usable X11 display, RFB password, portal restore token or network connection **does not** grant those UnboundVNC permissions.
 
 Do **not** silently fall back from a denied portal request to a direct screencopy or virtual-input global. Such a fallback would defeat a user-visible denial. A compositor-specific direct-protocol adapter is a separately reviewed, explicitly selected backend that must demonstrate an equivalent local authorization boundary before it can be enabled.
 
