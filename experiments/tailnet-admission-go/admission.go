@@ -171,7 +171,8 @@ func (a *candidate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.TLS == nil || r.Method != http.MethodPost || r.URL.Path != "/private/view" ||
 		r.URL.RawQuery != "" || r.Host != a.cfg.ServiceDNS ||
 		r.Header.Get("Origin") != "https://"+a.cfg.ServiceDNS ||
-		r.Header.Get("Content-Type") != "application/json" || r.ContentLength > 0 {
+		r.Header.Get("Content-Type") != "application/json" || r.ContentLength != 0 ||
+		len(r.TransferEncoding) != 0 {
 		deny(w, http.StatusForbidden)
 		return
 	}
