@@ -4,6 +4,7 @@ on:
     paths:
       - 'apps/host-windows/**'
       - 'tests/host-windows-input/**'
+      - 'tests/host-windows-effect-safety/**'
       - 'tests/host-windows-runner-desktop/**'
       - 'tests/host-windows-ci-rfb/**'
       - '.github/workflows/windows-host-build.yml'
@@ -26,6 +27,8 @@ jobs:
         run: dotnet run --project tests/host-windows-consent/HostConsentChecks.csproj --configuration Release
       - name: Disabled input policy checks
         run: dotnet run --project tests/host-windows-input/HostInputPolicyChecks.csproj --configuration Release
+      - name: Host assembly native input disabled and fake release-failure checks
+        run: dotnet run --project tests/host-windows-effect-safety/HostEffectSafetyChecks.csproj --configuration Release -- apps/host-windows/bin/Release/net8.0-windows/UnboundVnc.Host.Windows.exe
       - name: Hosted Windows desktop probe (diagnostic only; no consent simulation)
         run: dotnet run --project tests/host-windows-runner-desktop/RunnerDesktopProbe.csproj --configuration Release -- apps/host-windows/bin/Release/net8.0-windows/UnboundVnc.Host.Windows.exe
       - name: Ephemeral runner synthetic consent and one Raw RFB pixel (not human approval)
