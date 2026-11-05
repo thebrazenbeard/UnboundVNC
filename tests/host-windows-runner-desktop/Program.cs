@@ -54,6 +54,12 @@ internal static class Program
         Console.WriteLine("HOSTED_GUI_RUNTIME=INTERACTIVE_CANDIDATE_NOT_HUMAN_VERIFIED");
         bool screenCopy = TryCaptureTestOwnedPixel();
         Console.WriteLine($"TEST_OWNED_FORM_PIXEL_COPY={(screenCopy ? "PASS" : "FAILED")}");
+        if (!screenCopy)
+        {
+            Console.WriteLine("HOST_LAUNCH=NOT_ATTEMPTED_SCREEN_COPY_FAILED");
+            Console.WriteLine("RFB_FRAMEBUFFER=NOT_TESTED_NO_HUMAN_CONSENT");
+            return 1; // An interactive-desktop capture claim requires actual pixel-match evidence.
+        }
         if (args.Length != 1 || !File.Exists(args[0]))
         {
             Console.WriteLine("HOST_LAUNCH=BLOCKED_HOST_BINARY_MISSING");
