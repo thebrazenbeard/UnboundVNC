@@ -6,6 +6,7 @@ on:
       - 'tests/integration/stock-tigervnc.test.mjs'
       - '.github/workflows/stock-tigervnc-interop.yml'
       - 'apps/gateway/src/server.mjs'
+      - 'apps/gateway/test/gateway.test.mjs'
   workflow_dispatch:
 
 permissions:
