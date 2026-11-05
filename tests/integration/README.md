@@ -1,5 +1,19 @@
 # Gateway ↔ synthetic RFB integration
 
+The `gateway-rfb.test.mjs` suite now covers the RFC 6143 handshake differences
+for RFB 3.3 (server-selected 32-bit security type), 3.7 (security list without
+`SecurityResult` after None), and 3.8 (`SecurityResult` after None). Each
+version reaches the actual loopback HTTP→masked WebSocket→TCP gateway and
+returns the exact 2×2 Raw framebuffer. Run with:
+
+```sh
+node --test tests/interop/fixture.test.mjs tests/integration/gateway-rfb.test.mjs
+```
+
+These are **synthetic, insecure None-auth fixtures only**, and establish
+gateway byte transparency for the versions, not noVNC browser compatibility,
+stock RFB server behavior, encrypted transport, or RealVNC product parity.
+
 Run from repository root using Node.js 22+:
 
 ```bash
