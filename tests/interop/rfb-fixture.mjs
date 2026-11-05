@@ -48,7 +48,7 @@ function rawFramebufferUpdate() {
 }
 
 function attachConnection(socket, fixture) {
-  const connection = { socket, messages: [], stage: 'version', buffer: Buffer.alloc(0) };
+  const connection = { socket, messages: [], stage: 'version', buffer: Buffer.alloc(0), width: 2, height: 2 };
   fixture.connections.add(connection);
   socket.on('close', () => fixture.connections.delete(connection));
 
@@ -150,7 +150,7 @@ function attachConnection(socket, fixture) {
             x: b.readUInt16BE(2), y: b.readUInt16BE(4),
             width: b.readUInt16BE(6), height: b.readUInt16BE(8),
           };
-          if (!request.width || !request.height || request.x + request.width > 2 || request.y + request.height > 2) {
+          if (!request.width || !request.height || request.x + request.width > connection.width || request.y + request.height > connection.height) {
             fail('invalid framebuffer bounds');
             return;
           }
@@ -158,7 +158,7 @@ function attachConnection(socket, fixture) {
           publish(request);
           // A full-screen Raw rectangle is sent regardless of requested
           // subrectangle, so consumers should request the full 2x2 screen.
-          socket.write(rawFramebufferUpdate());
+          if (fixture.autoRespond) socket.write(rawFramebufferUpdate());
         } else if (type === 4) {
           if (b.length < 8) return;
           consumed = 8;
@@ -195,7 +195,7 @@ function attachConnection(socket, fixture) {
   return connection;
 }
 
-export function createRfbFixture({ version = '3.8' } = {}) {
+export function createRfbFixture({ version = '3.8', autoRespond = true } = {}) {
   if (!Object.hasOwn(VERSIONS, version)) throw new Error('unsupported synthetic RFB version');
   const events = new EventEmitter();
   const connections = new Set();
@@ -205,7 +205,17 @@ export function createRfbFixture({ version = '3.8' } = {}) {
     events,
     connections,
     version,
+    autoRespond,
     versionGreeting: VERSIONS[version],
+    resize(width, height) {
+      if (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1 || width > 4096 || height > 4096) {
+        throw new Error('invalid synthetic framebuffer size');
+      }
+      for (const connection of connections) {
+        connection.width = width;
+        connection.height = height;
+      }
+    },
     get host() { return '127.0.0.1'; },
     get port() { return server.address()?.port ?? null; },
     async start() {
