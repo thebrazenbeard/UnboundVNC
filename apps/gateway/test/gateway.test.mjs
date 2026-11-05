@@ -220,21 +220,28 @@ test('unsolicited and stale Pong frames cannot satisfy a heartbeat challenge', a
   });
 });
 
-test('coalesced large valid client frames stay bounded without false rejection', async t => {
+test('a nearly complete 1 MiB frame followed by a coalesced second frame is accepted', async t => {
   const f = await fixture(t);
   const ticket = await (await session(f)).json();
   const connected = await upgrade(f, ticket.wsPath);
   t.after(() => connected.socket.destroy());
   assert.equal((await connected.nextFrame()).toString(), 'RFB 003.008\n');
-  const payload = Buffer.alloc(700 * 1024, 0x42);
-  connected.socket.write(Buffer.concat([maskedBinary(payload), maskedBinary(payload)]));
+  const payload = Buffer.alloc(1024 * 1024, 0x42);
+  const small = Buffer.alloc(132, 0x43);
+  const largeFrame = maskedBinary(payload);
+  // Deliberately leave the parser holding all but 32 bytes of its maximum
+  // legal frame before coalescing the tail with a second valid frame. The old
+  // pre-parse aggregate-size check rejected this combination.
+  connected.socket.write(largeFrame.subarray(0, -32));
+  await new Promise(resolve => setTimeout(resolve, 80));
+  connected.socket.write(Buffer.concat([largeFrame.subarray(-32), maskedBinary(small)]));
   let received = 0;
-  while (received < payload.length * 2) {
+  while (received < payload.length + small.length) {
     const packet = await connected.nextPacket();
     assert.equal(packet.opcode, 2);
     received += packet.body.length;
   }
-  assert.equal(received, payload.length * 2);
+  assert.equal(received, payload.length + small.length);
   assert.equal(connected.socket.destroyed, false);
 });
 
