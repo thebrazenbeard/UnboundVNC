@@ -31,6 +31,23 @@ public preview, or privileged repository token is needed.
 To interpret a run, inspect the exact workflow job status and attached files.
 An absent artifact or a successful source build alone is **not** browser proof.
 
+## Stock TigerVNC framebuffer in actual Chromium (separate qualification)
+
+The `Stock TigerVNC to Chromium framebuffer (loopback)` workflow runs
+`node e2e/stock-rfb.mjs` on a disposable Ubuntu runner with an independently
+packaged `Xtigervnc` X11 server. It paints a known 480×320 root color via
+`xsetroot`, creates a one-port allowlisted *actual* loopback gateway, and uses
+the viewer's normal Quick Connect/noVNC path in Playwright Chromium. It verifies
+the decoded noVNC **canvas pixel** equals the X11 fixture's RGB bytes, then
+captures `stock-rfb-session.png`, `framebuffer-pixel.json`, trace and console
+events for readback. This is independent stock RFB server behavior, not
+hand-written fixture packets or an image drawn by the test.
+
+The fixture requests `SecurityTypes=None` solely for its explicit IPv4
+**loopback-only** test endpoint. It cannot be used as evidence of encrypted,
+authenticated, consented or authorized network access to a workstation.
+Neither the RFB listener nor the gateway is published or deployed.
+
 Passing this script establishes **UI interaction and rendering only**. It
 does not prove noVNC framebuffer display, authentication, secure connectivity,
 Windows host support, or RealVNC feature parity.

@@ -97,6 +97,8 @@ async function run() {
     await page.locator('#connection-error-message').waitFor();
     assert.equal(await page.locator('#connection-error-message').textContent(),
       'Gateway intentionally disabled for UI smoke test');
+    assert.equal(await page.locator('#toasts .toast-error').count(), 0,
+      'the persistent failure banner is not duplicated by a mobile-obscuring toast');
     assert.equal(await page.locator('#session-view').isVisible(), false);
 
     await page.setViewportSize({ width: 390, height: 844 });
