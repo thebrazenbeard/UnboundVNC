@@ -76,11 +76,3 @@ Read the [security boundary](docs/SECURITY_BOUNDARIES.md) and
 [initial release gates](docs/RELEASE_GATES.md) before exposing any remote
 access interface. A browser that displays a VNC server does not yet qualify
 secure unattended access or a remotely installed Windows host.
-
-## Relationship to VeraMesh
-
-[VeraMesh](https://github.com/thebrazenbeard/vera-mesh) is a separate
-authenticated workstation-capability gateway. UnboundVNC does not inherit
-its file/process permissions or claim to be running on any of Patrick's hosts.
-Future integration, if useful, requires a distinct tested authorization
-adapter. The projects and their licenses remain independent.
