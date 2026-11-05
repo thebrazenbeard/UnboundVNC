@@ -1,8 +1,23 @@
 # Windows attended host (experimental)
 
-This is a **source-only, view-only proof of concept**, not a production remote-access service. It targets .NET 8 WinForms on Windows, serves RFB 3.8 on **127.0.0.1:5901 only**, asks the logged-in local user to approve each connection before any RFB protocol or framebuffer bytes are sent, and limits each approved session to five minutes. The operator can stop sharing. Windows lock/disconnect and nondefault input desktop checks cause the connection to stop. A post-capture desktop/consent-epoch check attempts to prevent sending stale frames after revocation; this is not an atomic guarantee against a transition during network writes.
+This is a **view-only attended proof of concept**, not a production remote-access service. It targets .NET 8 WinForms on Windows, serves RFB 3.8 on **127.0.0.1:5901 only**, asks the logged-in local user to approve each connection before any RFB protocol or framebuffer bytes are sent, and limits each approved session to five minutes. The operator can stop sharing. Windows lock/disconnect and nondefault input desktop checks cause the connection to stop. A post-capture desktop/consent-epoch check attempts to prevent sending stale frames after revocation; this is not an atomic guarantee against a transition during network writes.
 
-No source here has been compiled or run on Windows in this PR. The authoring environment lacked a Windows runtime and .NET compiler. Building, protocol interoperability, capture, consent visibility, crash handling, and lock/UAC behavior are **unverified**. Static source review changes do not constitute a Windows build or runtime test.
+The attended host has passed a hosted Windows .NET 8 Release **build** in previous draft work, but no real interactive Windows host session has been performed. Protocol interoperability, capture, consent visibility, native input, crash handling, and lock/UAC behavior remain **runtime-unverified**. The current draft's input-policy compile and isolated checks require their own exact-head Windows Actions receipt; a build does not establish real remote-desktop behavior.
+
+## Disabled local input policy spike
+
+`ExperimentalInputPolicy` models the bytes *after* RFB KeyEvent (7 bytes) and PointerEvent (5 bytes) message types, with exact-length, range, key mapping and coordinate checks. The limited keyboard set is ASCII printable characters, Backspace, Tab, Enter, Escape and arrow keys. It rejects modifier keys, unsupported X11 keysyms, noncanonical down flags, nonzero padding, oversized payloads, out-of-frame coordinates, arithmetic overflow and unsupported pointer button bits (wheel/extended buttons). This deliberately incomplete mapping is not yet suitable for generic RFB viewer input interoperability.
+
+**No control path is enabled.** `NativeInputAdapter.Enabled` is false, both adapter methods always return false, no Win32 input API is imported, and the actual RFB session still discards KeyEvent and PointerEvent. There is deliberately no operational **Allow control** button: showing it before injection has been separately qualified would misrepresent what is available. The existing local approval continues to authorize view-only access exclusively.
+
+An independent future integration must satisfy all of these gates before enabling a local control prototype:
+
+1. Add an explicit per-connection **Allow control** button distinct from **Approve view only**, with view-only as the default; bind the selected mode immutably to that session and its consent epoch. No client RFB bytes alone authorize input.
+2. Build a Windows-native input adapter with verified `SendInput`/`SetCursorPos` interop, button/key release behavior, error handling and serialization with immediate Stop/lock revocation. Check the **Default** input desktop before each effect and never switch to or inject on secure/UAC/Winlogon desktops. Reject unmapped keys and invalid coordinates before any native call.
+3. On an isolated, consenting Windows test machine, verify regular app typing and pointer movement, real viewer keyup/button-up traces, nondefault desktop/lock/UAC transitions, failed/partial Win32 injection, UI failures, rapid Stop/approve races, timeout and disconnect. Any failure must stop the input session without leaving remote-held keys or buttons. Review whether shared keyboard state and UIPI prevent safe bounds; an impossible guarantee blocks enablement.
+4. Obtain independent hostile review and actual machine test receipts for the exact input-enabled head. Do not change loopback binding, RFB None security scope, firewall or listener exposure as part of this spike.
+
+Sources: [RFC 6143 KeyEvent/PointerEvent](https://www.rfc-editor.org/rfc/rfc6143.html), [Microsoft SendInput/UIPI restrictions](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendinput), [Microsoft SetCursorPos desktop requirement](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setcursorpos).
 
 ## Windows-only manual qualification
 
@@ -18,7 +33,7 @@ No source here has been compiled or run on Windows in this PR. The authoring env
 ## Explicitly absent
 
 - No LAN/Internet listener, TLS, authentication, unattended access, service install, firewall changes, or cloud relay.
-- No remote keyboard/mouse injection, clipboard, file transfer, multi-monitor management, reconnect credentials, or RealVNC feature parity.
+- No enabled remote keyboard/mouse injection (only the disabled parsing spike above), clipboard, file transfer, multi-monitor management, reconnect credentials, or RealVNC feature parity.
 - No UAC, Winlogon, locked desktop, pre-login, Session 0, or elevated-control support.
 - No end-to-end automation, native Windows build artifact, signed installer, or physical-host validation.
 
