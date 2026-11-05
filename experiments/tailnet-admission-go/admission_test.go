@@ -181,6 +181,8 @@ func TestWrongOriginHostOrNonTLSBeforeIdentity(t *testing.T) {
 		func(r *http.Request) { r.URL.Path = "/public" },
 		func(r *http.Request) { r.URL.RawQuery = "target=8.8.8.8" },
 		func(r *http.Request) { r.Header.Set("Content-Type", "text/plain") },
+		func(r *http.Request) { r.ContentLength = -1 },
+		func(r *http.Request) { r.ContentLength = -1; r.TransferEncoding = []string{"chunked"} },
 	} {
 		a, identity, _ := validFixture()
 		r := request()
