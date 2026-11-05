@@ -109,6 +109,8 @@ export function createGateway({ port = 6081, host = '127.0.0.1', allowedPorts = 
     rfb.setTimeout(5_000);
     let upgraded = false;
     let closed = false;
+    let rejecting = false;
+    let greeting = Buffer.alloc(0);
     let buffered = Buffer.alloc(0);
     let inbound = 0;
     let outbound = 0;
@@ -122,7 +124,7 @@ export function createGateway({ port = 6081, host = '127.0.0.1', allowedPorts = 
       clearTimeout(lifeTimer);
       connections.delete(cleanup);
       rfb.destroy();
-      ws.destroy();
+      if (!rejecting) ws.destroy();
     }
     function resetIdle() { clearTimeout(idleTimer); idleTimer = setTimeout(cleanup, IDLE_MS); idleTimer.unref(); }
     connections.add(cleanup);
@@ -132,17 +134,32 @@ export function createGateway({ port = 6081, host = '127.0.0.1', allowedPorts = 
     rfb.on('close', cleanup);
     rfb.on('timeout', cleanup);
     rfb.on('connect', () => {
-      rfb.setTimeout(0);
       if (closed) return;
+      // Keep TCP timeout active until the server proves it speaks basic RFB.
+    });
+    function acceptRfb() {
+      rfb.setTimeout(0);
       const accept = createHash('sha1').update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest('base64');
       ws.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
       upgraded = true;
       resetIdle();
       lifeTimer = setTimeout(cleanup, MAX_LIFETIME_MS); lifeTimer.unref();
       if (head.length) ingest(head);
-    });
+    }
     rfb.on('data', data => {
-      if (!upgraded || closed) return;
+      if (closed) return;
+      if (!upgraded) {
+        greeting = Buffer.concat([greeting, data]);
+        if (greeting.length < 12) return;
+        if (!/^RFB [0-9]{3}\.[0-9]{3}\n$/.test(greeting.subarray(0, 12).toString('ascii'))) {
+          rejecting = true;
+          rejectUpgrade(ws, 403);
+          return cleanup();
+        }
+        acceptRfb();
+        data = greeting;
+        greeting = Buffer.alloc(0);
+      }
       outbound += data.length;
       if (outbound > MAX_TRANSFER) return cleanup();
       resetIdle();
