@@ -35,6 +35,7 @@
 
 - **Linux X11**: x0vncserver and x11vnc independently installed, confined to loopback/Unix socket, tested against viewer/gateway; negative access, input, clipboard and session teardown tests.
 - **Linux Wayland**: compositor capability detection; portal rejection; versioned portal stream metadata and stable-session mapping; output-to-stream mapping; monitor scaling/hotplug; no input before consent; permission revocation; optional `w0vncserver` compatibility. Do not assume any compositor or portal advertises a particular protocol version or stream identifier.
+  The separate [Wayland adapter security contract](WAYLAND_ADAPTER_SECURITY_REVIEW.md) details portal-versus-privileged-protocol selection, libei region mapping, session generations, negative tests and runtime qualification blockers.
 - **RDP**: a **separate RDP client** adapter (e.g. evaluate FreeRDP if needed) to reach xrdp; xrdp/xorgxrdp installation and TLS, session resizing, reconnect, deny tests. Do not assume an RFB viewer connects directly to xrdp.
 
 ## Source checkpoints reviewed by the specialists
