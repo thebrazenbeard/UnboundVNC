@@ -9,6 +9,7 @@ const MAX_BUFFERED = MAX_FRAME + 14;
 const TICKET_MS = 30_000;
 const HEARTBEAT_MS = 30_000;
 const MAX_SOCKETS = 8;
+const CLOSE_GRACE_MS = 500;
 const utf8 = new TextDecoder('utf-8', { fatal: true });
 
 /** Optional CLI allowlist: comma-separated TCP ports, with no wildcard or range syntax. */
@@ -145,28 +146,49 @@ export function createGateway({ port = 6081, host = '127.0.0.1', allowedPorts = 
     let fragment = false;
     let heartbeatTimer;
     let expectedPong = null;
+    let closeTimer;
+    function scheduleCloseDeadline() {
+      // ws.end() sends our Close+FIN but does not require the peer to send
+      // its own FIN. Keep the connection counted until the socket closes,
+      // with a bounded deadline for a peer that deliberately half-opens TCP.
+      closeTimer = setTimeout(() => ws.destroy(), CLOSE_GRACE_MS);
+      closeTimer.unref();
+    }
     function cleanup(closePayload) {
       if (closed) return;
       closed = true;
       clearInterval(heartbeatTimer);
-      connections.delete(cleanup);
       rfb.destroy();
       if (!rejecting) {
         // A valid masked Close deserves a matching Close reply before TCP FIN.
         // Error/timeout/abrupt transport teardown still destroys immediately.
-        if (Buffer.isBuffer(closePayload)) ws.end(frame(8, closePayload));
+        if (Buffer.isBuffer(closePayload)) {
+          ws.end(frame(8, closePayload));
+          scheduleCloseDeadline();
+        }
         else ws.destroy();
-      }
+      } else scheduleCloseDeadline();
     }
-    connections.add(cleanup);
-    ws.on('error', cleanup);
+    function forceCleanup() {
+      cleanup();
+      clearTimeout(closeTimer);
+      ws.destroy();
+    }
+    connections.add(forceCleanup);
+    ws.on('error', forceCleanup);
     // An upgraded HTTP socket can receive FIN without reaching 'close' yet.
     // Release its RFB peer on the readable half-close as well.
-    ws.on('end', cleanup);
-    ws.on('close', cleanup);
-    rfb.on('error', cleanup);
-    rfb.on('close', cleanup);
-    rfb.on('timeout', cleanup);
+    ws.on('end', forceCleanup);
+    ws.on('close', () => {
+      clearTimeout(closeTimer);
+      connections.delete(forceCleanup);
+      cleanup();
+    });
+    // rfb.destroy() during a valid WS Close asynchronously emits 'close'.
+    // It must not preempt the outbound WebSocket Close echo.
+    rfb.on('error', () => { if (!closed) forceCleanup(); });
+    rfb.on('close', () => { if (!closed) forceCleanup(); });
+    rfb.on('timeout', () => { if (!closed) forceCleanup(); });
     rfb.on('connect', () => {
       if (closed) return;
       // Keep TCP timeout active until the server proves it speaks basic RFB.
