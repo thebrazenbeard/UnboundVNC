@@ -17,7 +17,7 @@ async function fixture(t, gatewayOptions = {}) {
   const gateway = createGateway({ port: 0, allowedPorts: [rfb.address().port], ...gatewayOptions });
   const url = await gateway.listen();
   t.after(async () => { await gateway.close(); await new Promise(resolve => rfb.close(resolve)); });
-  return { url, origin: url, port: rfb.address().port, gateway };
+  return { url, origin: url, port: rfb.address().port, gateway, rfb };
 }
 
 async function session(f, target = { host: '127.0.0.1', port: f.port }, headers = {}) {
@@ -500,6 +500,87 @@ test('quiet authorized sessions survive multiple WebSocket heartbeats', async t 
     else assert.fail(`unexpected WebSocket opcode ${packet.opcode}`);
   }
   assert.equal(echoed, 'still connected');
+});
+
+test('a non-reading peer cannot accumulate unbounded Pong replies to masked Ping flood', async t => {
+  const f = await fixture(t);
+  const ticket = await (await session(f)).json();
+  // The ticket POST closes its own HTTP socket; this next connection is WS.
+  const accepted = once(f.gateway.server, 'connection');
+  const acceptedRfb = once(f.rfb, 'connection');
+  const connected = await upgrade(f, ticket.wsPath);
+  const [ws] = await accepted;
+  const [rfbSocket] = await acceptedRfb;
+  t.after(() => connected.socket.destroy());
+  connected.socket.on('error', () => {});
+  assert.equal((await connected.nextFrame()).toString(), 'RFB 003.008\n');
+  connected.socket.pause(); // A stalled browser, still capable of writing.
+
+  let peakQueue = ws.writableLength;
+  const sampler = setInterval(() => { peakQueue = Math.max(peakQueue, ws.writableLength); }, 10);
+  t.after(() => clearInterval(sampler));
+
+  // Every frame has a fresh random RFC 6455 mask. 125-byte Pings maximize
+  // the bounded control response while retaining the legal control size.
+  const pingBody = Buffer.alloc(125, 0x5a);
+  for (let batch = 0; batch < 48; batch++) {
+    const frames = [];
+    for (let i = 0; i < 2048; i++) frames.push(maskedFrame(pingBody, 9));
+    connected.socket.write(Buffer.concat(frames));
+    // Let the gateway process each bounded burst, including its outbound
+    // writes, so peak sampling cannot miss a single long synchronous batch.
+    await new Promise(resolve => setTimeout(resolve, 1));
+  }
+  await new Promise(resolve => setTimeout(resolve, 1500));
+  clearInterval(sampler);
+  console.log(`stalled Ping/Pong peakQueue=${peakQueue}B wsQueue=${ws.writableLength}B closed=${ws.destroyed}`);
+  assert.ok(peakQueue <= 512 * 1024,
+    `Pong replies escaped bounded outbound queue: ${peakQueue}B`);
+  assert.equal(ws.destroyed, true, 'non-reading Ping flood must release its WS slot');
+  await new Promise((resolve, reject) => {
+    if (rfbSocket.destroyed) return resolve();
+    const timer = setTimeout(() => reject(new Error('flooded upstream RFB socket remained open')), 1500);
+    rfbSocket.once('close', () => { clearTimeout(timer); resolve(); });
+  });
+  const recoveredTicket = await (await session(f)).json();
+  const recovered = await upgrade(f, recoveredTicket.wsPath);
+  t.after(() => recovered.socket.destroy());
+  assert.match(recovered.response, /^HTTP\/1\.1 101/);
+  assert.equal((await recovered.nextFrame()).toString(), 'RFB 003.008\n');
+});
+
+test('a valid Ping survives moderate queued RFB output and receives its Pong', async t => {
+  const f = await fixture(t);
+  const ticket = await (await session(f)).json();
+  const wsAccepted = once(f.gateway.server, 'connection');
+  const rfbAccepted = once(f.rfb, 'connection');
+  const connected = await upgrade(f, ticket.wsPath);
+  const [ws] = await wsAccepted;
+  const [rfbSocket] = await rfbAccepted;
+  t.after(() => { ws.uncork(); connected.socket.destroy(); });
+  assert.equal((await connected.nextFrame()).toString(), 'RFB 003.008\n');
+
+  // Defer socket flushing to deterministically model a short-lived, normal
+  // framebuffer backlog, independently of the runner's TCP receive window.
+  ws.cork();
+  rfbSocket.write(Buffer.alloc(64 * 1024, 0x47));
+  for (let i = 0; i < 100 && ws.writableLength === 0; i++) {
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+  assert.ok(ws.writableLength >= 64 * 1024 && ws.writableLength < 128 * 1024,
+    `did not reproduce moderate framebuffer output backlog: ${ws.writableLength}B`);
+  connected.socket.write(maskedFrame('moderate-framebuffer', 9));
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(ws.destroyed, false, 'ordinary Ping must not disconnect a moderately backed-up session');
+  ws.uncork();
+  const frame = await connected.nextPacket();
+  assert.equal(frame.opcode, 2);
+  assert.equal(frame.body.length, 64 * 1024);
+  const pong = await connected.nextPacket();
+  assert.equal(pong.opcode, 10);
+  assert.equal(pong.body.toString(), 'moderate-framebuffer');
+  connected.socket.write(maskedBinary('session still usable'));
+  assert.equal((await connected.nextFrame()).toString(), 'session still usable');
 });
 
 test('unsolicited and stale Pong frames cannot satisfy a heartbeat challenge', async t => {
