@@ -130,3 +130,39 @@ test('excessive SetEncodings count is rejected without buffer allocation', async
   c.socket.write(Buffer.from([2, 0, 0, 129]));
   assert.match((await error)[1].message, /too many encodings/);
 });
+
+test('RFB 3.3 downgrade is rejected before security negotiation', async (t) => {
+  const c = await connect(t);
+  assert.equal((await c.read(12)).toString('ascii'), fixtureProtocol.VERSION);
+  const error = once(c.fixture.events, 'protocolError');
+  const closed = once(c.socket, 'close');
+  c.socket.write('RFB 003.003\n');
+  assert.match((await error)[1].message, /unsupported RFB protocol version/);
+  await closed;
+});
+
+test('reserved security selection zero receives RFB 3.8 failure reason', async (t) => {
+  const c = await connect(t);
+  await c.read(12);
+  c.socket.write(fixtureProtocol.VERSION);
+  assert.deepEqual(await c.read(2), Buffer.from([1, 1]));
+  c.socket.write(Buffer.from([0]));
+  const result = await c.read(8);
+  assert.equal(result.readUInt32BE(0), 1);
+  const reasonLength = result.readUInt32BE(4);
+  assert.equal((await c.read(reasonLength)).toString(), 'Unsupported security type');
+});
+
+test('invalid ClientInit shared byte closes before ServerInit', async (t) => {
+  const c = await connect(t);
+  await c.read(12);
+  c.socket.write(fixtureProtocol.VERSION);
+  assert.deepEqual(await c.read(2), Buffer.from([1, 1]));
+  c.socket.write(Buffer.from([1]));
+  assert.equal((await c.read(4)).readUInt32BE(0), 0);
+  const error = once(c.fixture.events, 'protocolError');
+  const closed = once(c.socket, 'close');
+  c.socket.write(Buffer.from([2]));
+  assert.match((await error)[1].message, /invalid ClientInit shared flag/);
+  await closed;
+});
