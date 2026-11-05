@@ -358,7 +358,13 @@ test('stock TigerVNC VncAuth accepts valid password and rejects incorrect passwo
     assert.equal(update.readUInt16BE(2), 1);
     const rect = await approved.ws.read(12);
     assert.deepEqual([rect.readUInt16BE(4), rect.readUInt16BE(6), rect.readInt32BE(8)], [WIDTH, HEIGHT, 0]);
-    assert.equal((await approved.ws.read(WIDTH * HEIGHT * 4)).length, WIDTH * HEIGHT * 4);
+    const authenticatedPixels = await approved.ws.read(WIDTH * HEIGHT * 4);
+    for (let pixel = 0; pixel < authenticatedPixels.length; pixel += 4) {
+      const word = init[6] ? authenticatedPixels.readUInt32BE(pixel) : authenticatedPixels.readUInt32LE(pixel);
+      const rgb = [init[14], init[15], init[16]].map(shift => (word >>> shift) & 255);
+      assert.ok(rgb[0] === 0x28 && rgb[1] === 0x91 && rgb[2] === 0x4c,
+        `authenticated framebuffer failed X11 test-colour oracle at pixel ${pixel / 4}`);
+    }
     approved.ws.close(); // Graceful RFC 6455 Close, not an abrupt network failure.
     await waitForRfbSessionRelease(tiger.port);
 
