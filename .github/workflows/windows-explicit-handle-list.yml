@@ -1,0 +1,23 @@
+name: Windows STARTUPINFOEX inherited handle-list falsifier (default OFF)
+
+on:
+  pull_request:
+    paths:
+      - 'experiments/windows-explicit-handle-list/**'
+      - '.github/workflows/windows-explicit-handle-list.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  process-inheritance-falsifier:
+    runs-on: windows-2025
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Build and exercise native Windows per-child handle inheritance
+        run: dotnet run --project experiments/windows-explicit-handle-list/WindowsExplicitHandleListFalsifier.csproj --configuration Release
