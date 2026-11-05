@@ -713,6 +713,115 @@ test('unsolicited masked Pong flood cannot evade per-session control budget', as
   await closed;
 });
 
+test('zero-length binary frame flood cannot monopolize eight RFB session slots', async t => {
+  const f = await fixture(t);
+  const clients = [];
+  for (let i = 0; i < 8; i++) {
+    const ticket = await (await session(f)).json();
+    const client = await upgrade(f, ticket.wsPath);
+    clients.push(client);
+    t.after(() => client.socket.destroy());
+    assert.equal((await client.nextFrame()).toString(), 'RFB 003.008\n');
+  }
+  const extraTicket = await (await session(f)).json();
+  const rejected = await upgrade(f, extraTicket.wsPath);
+  t.after(() => rejected.socket.destroy());
+  assert.match(rejected.response, /^HTTP\/1\.1 429/);
+
+  const offender = clients[0].socket;
+  offender.on('error', () => {});
+  let offenderClosed = false;
+  offender.once('close', () => { offenderClosed = true; });
+  const cpuStart = process.cpuUsage();
+  let emptyFramesSent = 0;
+  const flood = (async () => {
+    // Fixed offered-count oracle: runner scheduling must not terminate the
+    // producer before it crosses the 4096-frame cap on an overloaded host.
+    for (let batchNumber = 0; batchNumber < 32 && !offender.destroyed; batchNumber++) {
+      // Each frame is a valid, independently masked, FIN binary message.
+      // No RFB payload reaches the upstream or Pong output to backpressure.
+      const batch = Buffer.concat(Array.from({ length: 512 }, () => maskedBinary(Buffer.alloc(0))));
+      offender.write(batch);
+      emptyFramesSent += 512;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+  })();
+  const ordinary = (async () => {
+    let worstMs = 0;
+    for (let round = 0; round < 8; round++) {
+      await new Promise(resolve => setTimeout(resolve, 80));
+      const started = performance.now();
+      await Promise.all(clients.slice(1).map(async (client, i) => {
+        const payload = `small-real-RFB-${round}-${i}`;
+        client.socket.write(maskedBinary(payload));
+        assert.equal((await client.nextFrame()).toString(), payload);
+      }));
+      worstMs = Math.max(worstMs, performance.now() - started);
+    }
+    return worstMs;
+  })();
+  const [, worstOrdinaryRfbMs] = await Promise.all([flood, ordinary]);
+  const cpu = process.cpuUsage(cpuStart);
+  console.log(JSON.stringify({ emptyFrameFlood: { emptyFramesSent, offenderClosed,
+    cpuMicros: cpu.user + cpu.system, worstOrdinaryRfbMs, concurrentSessions: 8 } }));
+  assert.ok(worstOrdinaryRfbMs < 4000, 'legitimate RFB sessions failed to progress during zero-frame flood');
+  assert.equal(offenderClosed, true, 'empty binary frames escaped a per-session data-frame budget');
+  const recoveryTicket = await (await session(f)).json();
+  const recovered = await upgrade(f, recoveryTicket.wsPath);
+  t.after(() => recovered.socket.destroy());
+  assert.match(recovered.response, /^HTTP\/1\.1 101/);
+  assert.equal((await recovered.nextFrame()).toString(), 'RFB 003.008\n');
+});
+
+test('4096 legitimate one-byte WebSocket binary frames pass byte-exact RFB data', async t => {
+  const f = await fixture(t);
+  const ticket = await (await session(f)).json();
+  const connected = await upgrade(f, ticket.wsPath);
+  t.after(() => connected.socket.destroy());
+  assert.equal((await connected.nextFrame()).toString(), 'RFB 003.008\n');
+  const expected = Buffer.alloc(4096);
+  const frames = [];
+  for (let i = 0; i < expected.length; i++) {
+    expected[i] = i % 251;
+    frames.push(maskedBinary(Buffer.from([expected[i]])));
+  }
+  connected.socket.write(Buffer.concat(frames));
+  const chunks = [];
+  let received = 0;
+  while (received < expected.length) {
+    const packet = await connected.nextPacket();
+    assert.equal(packet.opcode, 2);
+    chunks.push(packet.body);
+    received += packet.body.length;
+    assert.ok(received <= expected.length, 'RFB echo unexpectedly duplicated tiny input');
+  }
+  assert.deepEqual(Buffer.concat(chunks), expected);
+  await new Promise(resolve => setTimeout(resolve, 10));
+  connected.socket.write(maskedBinary('RFB after tiny frame burst'));
+  assert.equal((await connected.nextFrame()).toString(), 'RFB after tiny frame burst');
+});
+
+test('valid fragmented binary RFB data tolerates empty continuation frames', async t => {
+  const f = await fixture(t);
+  const ticket = await (await session(f)).json();
+  const connected = await upgrade(f, ticket.wsPath);
+  t.after(() => connected.socket.destroy());
+  assert.equal((await connected.nextFrame()).toString(), 'RFB 003.008\n');
+  const first = maskedFrame('part-', 2);
+  first[0] &= 0x7f; // FIN=0, start binary fragmented message
+  const emptyContinuation = maskedFrame(Buffer.alloc(0), 0);
+  emptyContinuation[0] &= 0x7f; // FIN=0 continuation, empty but valid
+  const last = maskedFrame('complete', 0); // FIN=1 continuation
+  connected.socket.write(Buffer.concat([first, emptyContinuation, last]));
+  let echo = '';
+  while (echo.length < 'part-complete'.length) {
+    const packet = await connected.nextPacket();
+    assert.equal(packet.opcode, 2);
+    echo += packet.body.toString();
+  }
+  assert.equal(echo, 'part-complete');
+});
+
 test('unsolicited and stale Pong frames cannot satisfy a heartbeat challenge', async t => {
   const f = await fixture(t, { heartbeatMs: 100 });
   const ticket = await (await session(f)).json();
