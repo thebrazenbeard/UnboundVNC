@@ -1,5 +1,6 @@
 import RFB from '@novnc/novnc';
 import { describeEndpoint, loadDevices, saveDevices, sortedDevices, validateDevice } from './devices.mjs';
+import { fingerprintServerKey } from './identity.mjs';
 import './style.css';
 
 const app = document.querySelector('#app');
@@ -99,8 +100,9 @@ app.innerHTML = `
     <p class="modal-hint">The VNC server requested credentials. They are used for this session only.</p><label>Username <input name="username" autocomplete="username" placeholder="If required"/></label><label>Password <input name="password" type="password" autocomplete="off" autofocus placeholder="VNC password"/></label>
     <div class="modal-footer"><button id="credentials-cancel" class="btn btn-quiet" type="button">Disconnect</button><button class="btn btn-primary" type="submit">Authenticate ${glyph.arrow}</button></div>
   </form></dialog>
-  <dialog id="identity-dialog" class="modal"><div class="modal-header"><div><p class="section-kicker">VERIFY YOUR DESTINATION</p><h2>Confirm server identity</h2></div></div><p id="identity-detail" class="modal-hint">The remote server has requested manual identity verification. Confirm it through a trusted channel before proceeding.</p>
-    <div class="modal-footer"><button class="btn btn-quiet" id="identity-reject" type="button">Disconnect</button><button class="btn btn-primary" id="identity-approve" type="button">I verified this server</button></div></dialog>
+  <dialog id="identity-dialog" class="modal"><div class="modal-header"><div><p class="section-kicker">VERIFY YOUR DESTINATION</p><h2>Confirm server identity</h2></div></div><p id="identity-detail" class="modal-hint">Compare this key fingerprint with one obtained through a trusted, separate channel. Do not approve an unknown or changed fingerprint.</p>
+    <p class="modal-hint">SHA-256 server key fingerprint:</p><code id="identity-fingerprint" class="identity-fingerprint">Calculating…</code>
+    <div class="modal-footer"><button class="btn btn-quiet" id="identity-reject" type="button">Disconnect</button><button class="btn btn-primary" id="identity-approve" type="button" disabled>I verified this key</button></div></dialog>
   <div id="toasts" class="toast-stack" aria-live="polite"></div>
 `;
 
@@ -164,6 +166,8 @@ function hideSession() {
   document.querySelector('#remote-screen').replaceChildren();
   closeDialog('credentials-dialog');
   closeDialog('identity-dialog');
+  document.querySelector('#identity-approve').disabled = true;
+  document.querySelector('#identity-fingerprint').textContent = 'Calculating…';
 }
 
 function disconnect() {
@@ -171,6 +175,7 @@ function disconnect() {
   if (!previous) { hideSession(); return; }
   state.connection = null;
   previous.manual = true;
+  previous.abortController?.abort();
   try { previous.rfb?.disconnect(); } catch { /* session may already be closed */ }
   hideSession();
 }
@@ -181,13 +186,14 @@ async function connectTo(device) {
   try { target = validateDevice(device); }
   catch (error) { notify(error.message, 'error'); return; }
   showSession(target);
-  const connection = { device, rfb: null, manual: false };
+  const connection = { device, rfb: null, manual: false, abortController: new AbortController(), verificationReady: false };
   state.connection = connection;
   try {
     const response = await fetch('/api/sessions', {
       method: 'POST', credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ host: target.host, port: target.port }),
+      signal: AbortSignal.any([connection.abortController.signal, AbortSignal.timeout(10000)]),
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(data.error || data.message || `Gateway rejected connection (${response.status}).`);
@@ -212,10 +218,25 @@ async function connectTo(device) {
     rfb.addEventListener('credentialsrequired', () => {
       if (state.connection === connection) document.querySelector('#credentials-dialog').showModal();
     });
-    rfb.addEventListener('serververification', event => {
+    rfb.addEventListener('serververification', async event => {
       if (state.connection !== connection) return;
-      document.querySelector('#identity-detail').textContent = `The server requested identity verification (${event.detail?.type || 'unknown method'}). Confirm the server's identity through a separate trusted channel before approving.`;
+      connection.verificationReady = false;
+      document.querySelector('#identity-approve').disabled = true;
+      document.querySelector('#identity-fingerprint').textContent = 'Calculating…';
+      document.querySelector('#identity-detail').textContent = `The remote server requested ${event.detail?.type || 'unknown'} key verification. Compare its fingerprint against a value obtained independently from the server owner. A VNC password does not prove server identity.`;
       document.querySelector('#identity-dialog').showModal();
+      try {
+        if (event.detail?.type !== 'RSA') throw new Error('Unsupported server verification method.');
+        const fingerprint = await fingerprintServerKey(event.detail.publickey);
+        if (state.connection !== connection) return;
+        document.querySelector('#identity-fingerprint').textContent = fingerprint;
+        connection.verificationReady = true;
+        document.querySelector('#identity-approve').disabled = false;
+      } catch (error) {
+        if (state.connection !== connection) return;
+        disconnect();
+        notify(`Could not verify server identity: ${error.message}`, 'error');
+      }
     });
     rfb.addEventListener('securityfailure', event => {
       if (state.connection !== connection) return;
@@ -327,6 +348,8 @@ for (const id of ['credentials-dialog', 'identity-dialog']) {
   });
 }
 document.getElementById('identity-approve').addEventListener('click', () => {
+  if (!state.connection?.verificationReady) return;
+  state.connection.verificationReady = false;
   closeDialog('identity-dialog');
   state.connection?.rfb?.approveServer();
 });

@@ -141,6 +141,7 @@ button:focus-visible, a:focus-visible, input:focus-visible { outline: 2px solid 
 .modal-x { display: grid; place-items: center; background: transparent; color: #93a5bf; border: 0; border-radius: 6px; width: 28px; height: 28px; }
 .modal-x:hover { color: #fff; background: rgba(255,255,255,.06); }
 .modal-hint { font-size: 12px; line-height: 1.75; color: #8799b4; margin: 0 0 18px; }
+.identity-fingerprint { display: block; overflow-wrap: anywhere; color: #67edc9; background: #091321; border: 1px solid rgba(103, 237, 201, .2); border-radius: 9px; padding: 12px; font: 12px/1.7 ui-monospace, SFMono-Regular, Consolas, monospace; user-select: all; }
 .form-error { color: #ffafa8; font-size: 12px; margin-bottom: 10px; }
 .modal-footer { display: flex; justify-content: flex-end; gap: 10px; margin-top: 26px; }
 .modal-footer .btn { min-width: 100px; }
