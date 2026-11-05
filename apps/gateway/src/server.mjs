@@ -127,6 +127,9 @@ export function createGateway({ port = 6081, host = '127.0.0.1', allowedPorts = 
     }
     connections.add(cleanup);
     ws.on('error', cleanup);
+    // An upgraded HTTP socket can receive FIN without reaching 'close' yet.
+    // Release its RFB peer on the readable half-close as well.
+    ws.on('end', cleanup);
     ws.on('close', cleanup);
     rfb.on('error', cleanup);
     rfb.on('close', cleanup);
