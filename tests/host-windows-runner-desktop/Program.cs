@@ -1,6 +1,5 @@
 using System.Diagnostics;
-using System.Net;
-using System.Net.Sockets;
+using System.Net.NetworkInformation;
 using System.Runtime.InteropServices;
 using System.Text;
 
@@ -53,6 +52,8 @@ internal static class Program
         }
 
         Console.WriteLine("HOSTED_GUI_RUNTIME=INTERACTIVE_CANDIDATE_NOT_HUMAN_VERIFIED");
+        bool screenCopy = TryCaptureTestOwnedPixel();
+        Console.WriteLine($"TEST_OWNED_FORM_PIXEL_COPY={(screenCopy ? "PASS" : "FAILED")}");
         if (args.Length != 1 || !File.Exists(args[0]))
         {
             Console.WriteLine("HOST_LAUNCH=BLOCKED_HOST_BINARY_MISSING");
@@ -61,11 +62,8 @@ internal static class Program
 
         // Only if a genuine interactive console is observed: check that the
         // stopped-by-default host creates its own window, without UI input.
-        if (CanConnectToHost())
-        {
-            Console.WriteLine("HOST_LAUNCH=BLOCKED_PORT_ALREADY_LISTENING");
-            return 1;
-        }
+        bool portBefore = IsPort5901Listening();
+        Console.WriteLine($"PORT_5901_PREEXISTING={portBefore}");
 
         Process? host = null;
         try
@@ -86,7 +84,9 @@ internal static class Program
                 if (handle != IntPtr.Zero) break;
                 Thread.Sleep(100);
             }
-            if (handle == IntPtr.Zero || CanConnectToHost())
+            bool portAfter = IsPort5901Listening();
+            Console.WriteLine($"PORT_5901_AFTER={portAfter}");
+            if (handle == IntPtr.Zero || (!portBefore && portAfter))
             {
                 Console.WriteLine("HOST_LAUNCH=FAILED_WINDOW_OR_STOPPED_DEFAULT");
                 return 1;
@@ -94,9 +94,11 @@ internal static class Program
             var title = new StringBuilder(128);
             _ = GetWindowText(handle, title, title.Capacity);
             bool titleMatched = title.ToString() == "UnboundVNC | Attended Host Preview";
-            Console.WriteLine($"HOST_LAUNCH={(titleMatched ? "STOPPED_WINDOW_CREATED" : "WINDOW_TITLE_MISMATCH")}");
+            bool startButton = HasChildCaption(handle, "Start local preview");
+            Console.WriteLine($"HOST_START_BUTTON_PRESENT={startButton}");
+            Console.WriteLine($"HOST_LAUNCH={(titleMatched && startButton ? "STOPPED_WINDOW_CREATED" : "WINDOW_OR_BUTTON_MISMATCH")}");
             Console.WriteLine("RFB_FRAMEBUFFER=NOT_TESTED_NO_HUMAN_CONSENT");
-            return titleMatched ? 0 : 1;
+            return titleMatched && startButton ? 0 : 1;
         }
         catch (Exception ex)
         {
@@ -122,17 +124,60 @@ internal static class Program
         }
     }
 
-    private static bool CanConnectToHost()
+    private static bool IsPort5901Listening()
     {
-        using var socket = new TcpClient();
-        using var timeout = new CancellationTokenSource(TimeSpan.FromMilliseconds(500));
+        // Read-only TCP table metadata: never connect to an unrelated listener.
+        return IPGlobalProperties.GetIPGlobalProperties().GetActiveTcpListeners()
+            .Any(endpoint => endpoint.Port == 5901);
+    }
+
+    private static bool HasChildCaption(IntPtr parent, string expected)
+    {
+        bool found = false;
+        _ = EnumChildWindows(parent, (child, ignored) =>
+        {
+            var label = new StringBuilder(128);
+            _ = GetWindowText(child, label, label.Capacity);
+            if (label.ToString() == expected) found = true;
+            return !found;
+        }, IntPtr.Zero);
+        return found;
+    }
+
+    private static bool TryCaptureTestOwnedPixel()
+    {
+        // A one-pixel check of an intentionally solid-colored test window.
+        // Never capture host desktop content, save images or print pixel values.
         try
         {
-            socket.ConnectAsync(IPAddress.Loopback, 5901, timeout.Token).GetAwaiter().GetResult();
-            return true;
+            var screen = Screen.PrimaryScreen!;
+            var area = screen.WorkingArea;
+            using var marker = new Form
+            {
+                FormBorderStyle = FormBorderStyle.None,
+                ShowInTaskbar = false,
+                TopMost = true,
+                BackColor = Color.FromArgb(14, 171, 219),
+                StartPosition = FormStartPosition.Manual,
+                Location = new Point(area.Left + 30, area.Top + 30),
+                Size = new Size(120, 100)
+            };
+            marker.Show();
+            marker.Activate();
+            Application.DoEvents();
+            Thread.Sleep(300);
+            using var pixel = new Bitmap(1, 1);
+            using (var graphics = Graphics.FromImage(pixel))
+                graphics.CopyFromScreen(marker.Left + 60, marker.Top + 50, 0, 0, new Size(1, 1));
+            bool matches = pixel.GetPixel(0, 0).ToArgb() == marker.BackColor.ToArgb();
+            marker.Close();
+            return matches;
         }
-        catch (SocketException ex) when (ex.SocketErrorCode == SocketError.ConnectionRefused) { return false; }
-        catch (OperationCanceledException) { return true; } // Unknown port state: fail closed.
+        catch (Exception ex)
+        {
+            Console.WriteLine($"TEST_OWNED_FORM_PIXEL_ERROR={ex.GetType().Name}");
+            return false;
+        }
     }
 
     private static string NameOf(IntPtr handle)
@@ -155,4 +200,8 @@ internal static class Program
         StringBuilder buffer, uint length, out uint required);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern int GetWindowText(IntPtr window, StringBuilder text, int maxCount);
+    private delegate bool EnumChildCallback(IntPtr window, IntPtr parameter);
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool EnumChildWindows(IntPtr parent, EnumChildCallback callback, IntPtr parameter);
 }
