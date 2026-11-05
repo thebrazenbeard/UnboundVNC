@@ -69,7 +69,64 @@ await Check("host revokes pending consent", async () =>
     Require(await canceled.Task.WaitAsync(TimeSpan.FromSeconds(5)), "prompt cancellation was not delivered");
 });
 
-Console.WriteLine("PASS: 6 pending-consent checks");
+await Check("silent connected peer cannot hold pending consent indefinitely", async () =>
+{
+    var pair = await LoopbackPair();
+    using var peer = pair.peer;
+    using var host = pair.host;
+    var canceled = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+    var result = PendingConsentMonitor.ApproveWhileConnected(host.Client,
+        token => AwaitApprovalOrCancel(token, canceled), CancellationToken.None,
+        TimeSpan.FromMilliseconds(150));
+    Require(!await result.WaitAsync(TimeSpan.FromSeconds(5)), "silent peer outlived pending consent deadline");
+    Require(await canceled.Task.WaitAsync(TimeSpan.FromSeconds(5)), "timed-out prompt was not canceled");
+});
+
+await Check("timeout cannot turn cancellation into a stale positive approval", async () =>
+{
+    var pair = await LoopbackPair();
+    using var peer = pair.peer;
+    using var host = pair.host;
+    var canceled = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+    // Deliberately adversarial approval delegate: it reports true *after* cancellation.
+    var result = PendingConsentMonitor.ApproveWhileConnected(host.Client,
+        token =>
+        {
+            var decision = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            token.Register(() => { canceled.TrySetResult(true); decision.TrySetResult(true); });
+            return decision.Task;
+        }, CancellationToken.None, TimeSpan.FromMilliseconds(150));
+    Require(!await result.WaitAsync(TimeSpan.FromSeconds(5)), "expired pending consent accepted late positive decision");
+    Require(await canceled.Task.WaitAsync(TimeSpan.FromSeconds(5)), "timeout cancellation not observed");
+});
+
+await Check("new local peer remains admissible after prior pending timeout", async () =>
+{
+    var listener = new TcpListener(IPAddress.Loopback, 0);
+    listener.Start(2);
+    try
+    {
+        using (var firstPeer = new TcpClient())
+        {
+            await firstPeer.ConnectAsync((IPEndPoint)listener.LocalEndpoint);
+            using var firstHost = await listener.AcceptTcpClientAsync();
+            var refused = PendingConsentMonitor.ApproveWhileConnected(firstHost.Client,
+                token => AwaitApprovalOrCancel(token,
+                    new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously)),
+                CancellationToken.None, TimeSpan.FromMilliseconds(150));
+            Require(!await refused.WaitAsync(TimeSpan.FromSeconds(5)), "first silent peer was not refused");
+        }
+        using var secondPeer = new TcpClient();
+        await secondPeer.ConnectAsync((IPEndPoint)listener.LocalEndpoint);
+        using var secondHost = await listener.AcceptTcpClientAsync();
+        Require(await PendingConsentMonitor.ApproveWhileConnected(secondHost.Client,
+            _ => Task.FromResult(true), CancellationToken.None, TimeSpan.FromSeconds(2))
+                .WaitAsync(TimeSpan.FromSeconds(5)), "new healthy peer was refused after timeout");
+    }
+    finally { listener.Stop(); }
+});
+
+Console.WriteLine("PASS: 9 pending-consent checks");
 
 static async Task Check(string name, Func<Task> check)
 {
