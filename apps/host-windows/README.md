@@ -21,6 +21,12 @@ The following gates must pass on a consenting, isolated Windows machine **before
 
 Sources: [RFC 6143 KeyEvent/PointerEvent](https://www.rfc-editor.org/rfc/rfc6143.html), [Microsoft SendInput/UIPI restrictions](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendinput), [Microsoft SetCursorPos desktop requirement](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setcursorpos).
 
+## GitHub-hosted Windows desktop diagnostic (not consent qualification)
+
+`tests/host-windows-runner-desktop` is run only on the ephemeral Windows Actions VM. It reads process/console session IDs, `UserInteractive`, window station, thread/input desktop names and screen-presence metadata. It never captures or logs screen pixels, sends keyboard/pointer input, changes Windows services or policy, or invokes a consent button. If a normal interactive **WinSta0/Default** console cannot be established, it logs `HOSTED_GUI_RUNTIME=BLOCKED_NONINTERACTIVE_DESKTOP` and skips launching the host. A successful diagnostic step is **not** a successful GUI/RFB runtime qualification.
+
+Only if all session checks indicate a genuine interactive console does it launch a temporary copy of the host, check the window title and stopped-by-default loopback port state, then close **only its own child**. It still does not press Start, approve sharing or claim framebuffer output: automating the local approval would be synthetic consent, not proof of an attended human authorization boundary. Real RFB pixel tests remain gated on a specifically authorized interactive test machine with a real user present. This probe does not establish Windows 10/11 personal machine parity.
+
 ## Windows-only manual qualification
 
 1. On a consenting test PC with the .NET 8 SDK and a normal interactive desktop, run `dotnet run --project apps/host-windows/UnboundVnc.Host.Windows.csproj`.
