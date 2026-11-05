@@ -1,0 +1,31 @@
+name: Stock TigerVNC loopback interop
+
+on:
+  pull_request:
+    paths:
+      - 'tests/integration/stock-tigervnc.test.mjs'
+      - '.github/workflows/stock-tigervnc-interop.yml'
+      - 'apps/gateway/src/server.mjs'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tigervnc-loopback:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install stock Ubuntu TigerVNC package (no vendoring)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends tigervnc-standalone-server x11-xserver-utils
+          dpkg-query -W -f='${Package} ${Version}\n' tigervnc-standalone-server
+          command -v Xtigervnc
+      - name: Execute real stock-server RFB integration test
+        env:
+          RFB_STOCK_INTEROP: '1'
+        run: node --test tests/integration/stock-tigervnc.test.mjs
