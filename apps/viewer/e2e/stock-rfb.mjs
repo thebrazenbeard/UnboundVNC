@@ -251,7 +251,7 @@ async function run() {
       mobileReconnected, originalScreen: { width: 480, height: 320, rgb: RGB },
       replacementScreen: { width: 640, height: 360, rgb: RECONNECTED_RGB },
       unexpectedDisconnectBanner: true, retryConnected: true,
-      noCredentialReuse: true, viewOnlyPreserved: true,
+      noCredentialLikeBrowserStorage: true, viewOnlyPreserved: true,
     }, null, 2));
     await page.locator('#session-disconnect').click();
     assert.equal(await page.locator('#session-view').isVisible(), false, 'disconnect returns to dashboard');
