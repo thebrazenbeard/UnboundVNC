@@ -50,7 +50,7 @@ using (var toHonest = new AnonymousPipeServerStream(PipeDirection.Out, HandleInh
     Console.WriteLine("POST_DISPOSAL_SAME_USER_OUTSIDER_HANDLES_INVALID=PASS");
 
     using var from = new StreamReader(fromHonest, Encoding.UTF8, false, 1024, leaveOpen: true);
-    using var to = new StreamWriter(toHonest, new UTF8Encoding(false), 1024, leaveOpen: true)
+    var to = new StreamWriter(toHonest, new UTF8Encoding(false), 1024, leaveOpen: true)
         { AutoFlush = true };
     await to.WriteLineAsync("START_TEST_ONLY_CHANNEL");
     string? hello = await from.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(10));
@@ -65,6 +65,7 @@ using (var toHonest = new AnonymousPipeServerStream(PipeDirection.Out, HandleInh
     Check("honest client requested a second synthetic receipt", continuation == "SECOND_CHANNEL_REQUEST");
     lease.Stop();
     Check("Stop atomically revokes old synthetic channel epoch", !lease.StillCurrent(0));
+    to.Dispose(); // Flush/close the writer before the underlying server pipe.
     toHonest.Dispose();
     fromHonest.Dispose();
     await honest.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
