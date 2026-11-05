@@ -1,5 +1,5 @@
 import RFB from '@novnc/novnc';
-import { describeEndpoint, loadDevices, saveDevices, sortedDevices, validateDevice } from './devices.mjs';
+import { assertGatewayLocalTarget, describeEndpoint, loadDevices, saveDevices, sortedDevices, validateDevice } from './devices.mjs';
 import { fingerprintServerKey } from './identity.mjs';
 import { compareServerPin, forgetServerPin, readServerPin, rememberServerPin, requirePinnedIdentity, trustedEndpoint } from './trust.mjs';
 import { captureFocus, findDeviceAction, isToolbarEscape, restoreFocus } from './focus.mjs';
@@ -89,8 +89,8 @@ app.innerHTML = `
         <div class="section-tools"><label class="search-field">${glyph.search}<span class="sr-only">Search devices</span><input id="device-search" type="search" placeholder="Search devices…" autocomplete="off"/></label><button class="icon-btn" id="list-add" type="button" aria-label="Add a device" title="Add a device">${glyph.plus}</button></div></div>
         <div id="devices-grid" class="device-grid"></div>
       </section>
-      <section class="quick-panel" id="quick-connect"><div class="quick-symbol" aria-hidden="true">↗</div><div><div class="section-kicker">NO PROFILE NEEDED</div><h2>Quick connect</h2><p>Already have a VNC address? Connect directly over your own network.</p></div>
-        <form id="quick-form" class="quick-form"><label class="sr-only" for="quick-host">Hostname or IP</label><input id="quick-host" name="host" placeholder="Hostname or IP address" required autocomplete="off"/><label class="sr-only" for="quick-port">Port</label><input id="quick-port" name="port" type="number" value="5900" min="1" max="65535" required/><button class="btn btn-primary" type="submit">Connect ${glyph.arrow}</button></form></section>
+      <section class="quick-panel" id="quick-connect"><div class="quick-symbol" aria-hidden="true">↗</div><div><div class="section-kicker">GATEWAY-LOCAL PREVIEW</div><h2>Quick connect</h2><p id="quick-route-note">Use 127.0.0.1 or localhost for VNC on the gateway computer. This is not another Windows PC's address; remote connections are not enabled yet.</p></div>
+        <form id="quick-form" class="quick-form"><label class="sr-only" for="quick-host">Gateway-local host</label><input id="quick-host" name="host" placeholder="127.0.0.1 or localhost" aria-describedby="quick-route-note" required autocomplete="off"/><label class="sr-only" for="quick-port">Port</label><input id="quick-port" name="port" type="number" value="5900" min="1" max="65535" required/><button class="btn btn-primary" type="submit">Connect ${glyph.arrow}</button></form></section>
       <footer class="footer"><span>UNBOUNDVNC // ALPHA</span><span>VNC-NATIVE · SELF-HOSTED · USER-OWNED</span></footer>
     </main>
   </div>
@@ -105,7 +105,7 @@ app.innerHTML = `
     <label>Device name <input name="name" maxlength="64" required placeholder="e.g. Lappy"/></label>
     <label>Hostname or IP <input name="host" maxlength="253" required placeholder="192.168.1.25"/></label>
     <label>RFB port <input name="port" type="number" min="1" max="65535" required value="5900"/></label>
-    <p class="modal-hint">The target must already run a VNC-compatible server. Saved profiles never contain passwords.</p>
+    <p class="modal-hint">Only VNC servers on the computer running the gateway are reachable now (127.0.0.1 or localhost). You can save other addresses for later, but this preview cannot connect to them. Saved profiles never contain passwords.</p>
     <div id="device-form-error" class="form-error" role="alert" hidden></div>
     <div class="modal-footer"><button class="btn btn-quiet" type="button" data-close="device-dialog">Cancel</button><button class="btn btn-primary" type="submit">Save device</button></div>
   </form></dialog>
@@ -233,6 +233,12 @@ async function connectTo(device, viewOnly = false) {
   let target;
   try { target = validateDevice(device); }
   catch (error) { notify(error.message, 'error'); return; }
+  try { assertGatewayLocalTarget(target.host); }
+  catch (error) {
+    showConnectionFailure(device, error.message, viewOnly);
+    notify(error.message, 'error');
+    return;
+  }
   showSession(target, viewOnly);
   const connection = {
     device, target, rfb: null, manual: false, viewOnly, abortController: new AbortController(),

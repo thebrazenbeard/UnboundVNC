@@ -152,9 +152,25 @@ async function run() {
     page = await context.newPage();
     page.on('console', message => browserEvents.push({ type: `console.${message.type()}`, text: message.text() }));
     page.on('pageerror', error => browserEvents.push({ type: 'pageerror', text: error.message }));
+    const sessionRequests = [];
+    page.on('request', request => {
+      if (new URL(request.url()).pathname === '/api/sessions') sessionRequests.push(request.url());
+    });
 
     await page.goto('http://127.0.0.1:5173', { waitUntil: 'networkidle' });
     await page.getByText('Local gateway available').waitFor({ timeout: 10_000 });
+    // This is a real Chromium interaction with the actual gateway online.
+    // A remote IP must be rejected in the viewer before an RFB ticket request,
+    // while the following gateway-local stock RFB connection still succeeds.
+    await page.locator('#quick-host').fill('192.0.2.77');
+    await page.locator('#quick-form button[type="submit"]').click();
+    await page.locator('#connection-error-message').waitFor({ timeout: 5000 });
+    assert.match(await page.locator('#connection-error-message').textContent(),
+      /computer running the gateway/i);
+    assert.equal(sessionRequests.length, 0, 'remote address caused a gateway ticket request');
+    assert.equal(await page.locator('#session-view').isVisible(), false,
+      'rejected remote route should not open a session');
+    await page.locator('#connection-error-dismiss').click();
     await page.locator('#quick-host').fill('127.0.0.1');
     await page.locator('#quick-port').fill(String(rfbPort));
     await page.locator('#quick-form button[type="submit"]').click();

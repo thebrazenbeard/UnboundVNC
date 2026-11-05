@@ -2,6 +2,15 @@ export const STORAGE_KEY = 'unboundvnc.devices.v1';
 
 const HOST_PATTERN = /^(?=.{1,253}$)[a-zA-Z0-9_.:\-[\]]+$/;
 
+// Keep this preview's connection route no broader than the gateway's current
+// `POST /api/sessions` target policy. Saved profiles may retain remote hosts
+// for a future authenticated/encrypted routing implementation.
+export function assertGatewayLocalTarget(host) {
+  if (host !== '127.0.0.1' && host !== 'localhost') {
+    throw new Error('This preview reaches VNC only on the computer running the gateway (127.0.0.1 or localhost), not another PC. Secure remote routing is not available yet.');
+  }
+}
+
 export function validateDevice(input) {
   const name = String(input?.name ?? '').trim();
   const host = String(input?.host ?? '').trim();
