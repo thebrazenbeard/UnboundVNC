@@ -137,7 +137,8 @@ async function run() {
     }, null, 2));
 
     const desktopImage = path.join(screenshotDir, 'dashboard-desktop.png');
-    await page.screenshot({ path: desktopImage, fullPage: true });
+    // Card entrance animations stagger by index; capture the settled layout.
+    await page.screenshot({ path: desktopImage, fullPage: true, animations: 'disabled' });
 
     // The directory now has two saved profiles; target one by its saved name.
     await page.locator('.device-card').filter({ hasText: 'Alpha Renamed PC' })
@@ -152,7 +153,7 @@ async function run() {
     await page.setViewportSize({ width: 390, height: 844 });
     await page.locator('#quick-host').waitFor();
     const mobileImage = path.join(screenshotDir, 'dashboard-mobile.png');
-    await page.screenshot({ path: mobileImage, fullPage: true });
+    await page.screenshot({ path: mobileImage, fullPage: true, animations: 'disabled' });
     assert.equal(browserEvents.filter(event => event.type === 'pageerror').length, 0,
       'viewer has no uncaught browser exceptions');
     succeeded = true;
