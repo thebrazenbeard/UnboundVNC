@@ -4,10 +4,14 @@ using UnboundVnc.Host.Windows;
 
 if (args.Length != 1 || !File.Exists(args[0]))
     throw new ArgumentException("Pass the built Windows host managed DLL for policy inspection.");
+var hostDll = Path.GetFullPath(args[0]);
+if (!Path.GetFileName(hostDll).Equals("UnboundVnc.Host.Windows.dll", StringComparison.OrdinalIgnoreCase) ||
+    !File.Exists(Path.ChangeExtension(hostDll, ".exe")))
+    throw new ArgumentException("Expected the host managed DLL beside its built native EXE apphost.");
 
 Check("actual host assembly has no new user32 input-effect import", () =>
 {
-    var host = Assembly.LoadFrom(Path.GetFullPath(args[0]));
+    var host = Assembly.LoadFrom(hostDll);
     Require(host.GetName().Name == "UnboundVnc.Host.Windows", "inspecting an unexpected managed assembly");
     var allowedUser32 = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         { "OpenInputDesktop", "GetUserObjectInformationW", "CloseDesktop" };
