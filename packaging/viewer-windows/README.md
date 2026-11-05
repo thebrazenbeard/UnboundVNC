@@ -2,8 +2,9 @@
 
 **This source is not a Windows installer or released viewer.** It builds an
 unsigned, unpacked Windows application folder on a public GitHub-hosted runner;
-the folder is deliberately **not uploaded or distributed**. End-user launch,
-installation, UI rendering, VNC interoperability, offline first-run behavior,
+the folder is deliberately **not uploaded or distributed**. CI can attempt an
+ephemeral native Electron window/renderer/gateway lifecycle smoke test, but
+end-user launch, installation, VNC interoperability, offline first-run behavior,
 signing, SmartScreen and uninstall remain separately unverified gates.
 
 ## Choice, rejected shortcuts and cost
@@ -64,14 +65,18 @@ node packaging/viewer-windows/scripts/prepare.mjs
 `prepare.mjs` deliberately requires a fresh absent `runtime/` directory rather
 than overwriting stale build content. The GitHub workflow runs from a fresh
 checkout and checks the `.exe`/`app.asar` shape. Do not distribute that output.
-The tests exercise the real gateway's local `/api` policy with temporary
-assets, host/origin denials, refused untrusted WS upgrade, and explicit close;
-they do not launch Electron or prove UI/remote session behavior.
+The source tests exercise the real gateway's local `/api` policy with temporary
+assets, host/origin denials, refused untrusted WS upgrades, a successful
+synthetic loopback RFB WebSocket greeting, and explicit close. The hosted
+Windows workflow additionally launches Electron in a CI-only mode, checks the
+real viewer DOM and local gateway health, then requires process exit and both
+listeners closed. This does not prove an end-user installed remote session.
 
 ## Missing release and usability gates
 
 1. Clean, nondeveloper Windows 10/11 app-folder **launch and exit**; inspect
-   real displayed renderer, saved profiles, native window UX and full shutdown.
+   visible display, saved profiles, native window UX and full shutdown. A hosted
+   Windows Server CI smoke cannot replace interactive Windows 10/11 review.
 2. Windows packaging with legitimate installer/uninstaller, per-user permissions,
    updates/rollback, accurate uninstaller and data retention policy; no silent
    autorun or service startup.

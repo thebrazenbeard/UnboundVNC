@@ -40,6 +40,28 @@ if (!app.requestSingleInstanceLock()) {
       await window.loadURL(local.url);
       window.show();
       window.on('closed', () => { window = null; void stop(); });
+      if (process.env.UNBOUNDVNC_DESKTOP_CI_SMOKE === '1') {
+        if (process.env.GITHUB_ACTIONS !== 'true' ||
+            process.env.RUNNER_ENVIRONMENT !== 'github-hosted' || !process.env.RUNNER_TEMP) {
+          throw new Error('Desktop smoke mode is limited to an ephemeral GitHub-hosted runner');
+        }
+        const deadline = Date.now() + 15_000;
+        let rendered = false;
+        while (Date.now() < deadline && !rendered) {
+          rendered = await window.webContents.executeJavaScript(
+            "Boolean(document.querySelector('#quick-form') && document.querySelector('#devices-grid'))"
+          );
+          if (!rendered) await new Promise(done => setTimeout(done, 100));
+        }
+        if (!rendered) throw new Error('Desktop renderer failed to display the actual viewer');
+        const health = await fetch(new URL('/api/health', local.url));
+        if (!health.ok || !(await health.json()).ok) throw new Error('Desktop gateway was not reachable');
+        const { writeFile } = require('node:fs/promises');
+        await writeFile(join(process.env.RUNNER_TEMP, 'unboundvnc-viewer-desktop-smoke.json'), JSON.stringify({
+          renderer: 'loaded', url: local.url, gatewayUrl: local.gatewayUrl,
+        }));
+        await stop();
+      }
     } catch (error) {
       console.error('Unable to initialize local viewer:', error.message);
       await stop();

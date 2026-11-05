@@ -111,6 +111,7 @@ export async function startLocalViewer({ staticRoot, createGateway, allowedPorts
   }
   return {
     url: `http://${LOOPBACK}:${viewerPort}/`,
+    gatewayUrl: gatewayUrl.href,
     async close() {
       if (closing) return;
       closing = true;
