@@ -17,7 +17,7 @@ async function fixture(t, gatewayOptions = {}) {
   const gateway = createGateway({ port: 0, allowedPorts: [rfb.address().port], ...gatewayOptions });
   const url = await gateway.listen();
   t.after(async () => { await gateway.close(); await new Promise(resolve => rfb.close(resolve)); });
-  return { url, origin: url, port: rfb.address().port };
+  return { url, origin: url, port: rfb.address().port, gateway };
 }
 
 async function session(f, target = { host: '127.0.0.1', port: f.port }, headers = {}) {
@@ -189,6 +189,141 @@ test('rejects cross-origin WS handshake without exposing consumed ticket', async
   assert.match(good.response, /^HTTP\/1\.1 101/);
 });
 
+test('incomplete HTTP Upgrade headers cannot hold a burst of gateway sockets beyond five seconds', async t => {
+  const sockets = [];
+  function closedWithin(socket) {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('partial HTTP socket exceeded six-second deadline')), 6000);
+      socket.once('close', () => { clearTimeout(timer); resolve(); });
+    });
+  }
+  // Register before fixture's gateway.close() hook, so even a RED timeout
+  // destroys all deliberately incomplete HTTP connections during cleanup.
+  t.after(() => { for (const socket of sockets) socket.destroy(); });
+  const f = await fixture(t);
+  const port = Number(new URL(f.url).port);
+  const closures = [];
+  for (let i = 0; i < 9; i++) {
+    const socket = connect({ host: '127.0.0.1', port });
+    socket.on('error', () => {});
+    sockets.push(socket);
+    closures.push(closedWithin(socket));
+    socket.write(`GET /ws/session/incomplete HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nConnection: Upgrade\r\nX-Slow: `);
+    // Repeated bytes can reset a socket *idle* timeout; neither that nor
+    // nine simultaneous connections should reset the HTTP headers deadline.
+    const drip = setInterval(() => { if (!socket.destroyed) socket.write('a'); }, 1000);
+    socket.on('close', () => clearInterval(drip));
+  }
+  // A completed health request must not create a keep-alive escape hatch:
+  // its next partial Upgrade has to receive a fresh absolute deadline.
+  const reused = connect({ host: '127.0.0.1', port });
+  reused.on('error', () => {});
+  sockets.push(reused);
+  const response = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('health response timeout')), 1500);
+    let received = '';
+    reused.on('data', chunk => {
+      received += chunk.toString();
+      if (received.includes('"ok":true')) { clearTimeout(timer); resolve(); }
+    });
+  });
+  reused.write(`GET /api/health HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nConnection: keep-alive\r\n\r\n`);
+  await response;
+  assert.equal(reused.destroyed, false);
+  closures.push(closedWithin(reused));
+  reused.write(`GET /ws/session/incomplete HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nConnection: Upgrade\r\nX-Slow: `);
+  const reusedDrip = setInterval(() => { if (!reused.destroyed) reused.write('a'); }, 1000);
+  reused.on('close', () => clearInterval(reusedDrip));
+  await Promise.all(closures);
+  const ticket = await (await session(f)).json();
+  const connected = await upgrade(f, ticket.wsPath);
+  t.after(() => connected.socket.destroy());
+  assert.match(connected.response, /^HTTP\/1\.1 101/);
+  assert.equal((await connected.nextFrame()).toString(), 'RFB 003.008\n');
+});
+
+test('pre-upgrade partial HTTP sockets have a separate admission cap', async t => {
+  const sockets = [];
+  t.after(() => { for (const socket of sockets) socket.destroy(); });
+  const f = await fixture(t);
+  const port = Number(new URL(f.url).port);
+  const connected = [];
+  for (let i = 0; i < 24; i++) {
+    const socket = connect({ host: '127.0.0.1', port });
+    socket.on('error', () => {});
+    sockets.push(socket);
+    connected.push(new Promise(resolve => {
+      socket.once('connect', resolve);
+      socket.once('error', resolve);
+    }));
+    socket.write('G'); // Start but never finish an HTTP request.
+  }
+  await Promise.all(connected);
+  await new Promise(resolve => setTimeout(resolve, 100));
+  const live = await new Promise((resolve, reject) => f.gateway.server.getConnections((error, count) => error ? reject(error) : resolve(count)));
+  assert.ok(live <= 16, `partial HTTP headers occupied ${live} gateway sockets; expected at most 16`);
+  const closed = sockets.map(socket => socket.destroyed ? Promise.resolve() : new Promise(resolve => socket.once('close', resolve)));
+  for (const socket of sockets) socket.destroy();
+  await Promise.all(closed);
+  // Admission must recover as promptly as the stalled clients disconnect.
+  const ticket = await (await session(f)).json();
+  const recovered = await upgrade(f, ticket.wsPath);
+  assert.match(recovered.response, /^HTTP\/1\.1 101/);
+  assert.equal((await recovered.nextFrame()).toString(), 'RFB 003.008\n');
+  recovered.socket.destroy();
+});
+
+test('rejected WS Upgrade cannot keep a half-open TCP socket outside the HTTP deadline', async t => {
+  const f = await fixture(t);
+  const serverAccepted = once(f.gateway.server, 'connection');
+  // A bad ticket gets HTTP 403+FIN, but this deliberately nonconformant peer
+  // withholds its own FIN. It must remain counted and reach the hard deadline.
+  const attempt = await upgrade(f, `/ws/session/${'Z'.repeat(43)}`, f.origin, { allowHalfOpen: true });
+  attempt.socket.on('error', () => {});
+  t.after(() => attempt.socket.destroy());
+  const [serverSocket] = await serverAccepted;
+  assert.match(attempt.response, /^HTTP\/1\.1 403/);
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('rejected Upgrade held a half-open TCP socket beyond six seconds')), 6000);
+    serverSocket.once('close', () => { clearTimeout(timer); resolve(); });
+  });
+});
+
+test('gateway shutdown promptly destroys incomplete headers and rejected half-open upgrades', async t => {
+  const gateway = createGateway({ port: 0 });
+  const url = await gateway.listen();
+  const port = Number(new URL(url).port);
+  const sockets = [];
+  t.after(() => { for (const socket of sockets) socket.destroy(); });
+
+  const first = once(gateway.server, 'connection');
+  const partial = connect({ host: '127.0.0.1', port });
+  partial.on('error', () => {});
+  sockets.push(partial);
+  partial.write(`GET /ws/session/incomplete HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nX-Slow: `);
+  const [serverPartial] = await first;
+
+  const second = once(gateway.server, 'connection');
+  const rejected = connect({ host: '127.0.0.1', port, allowHalfOpen: true });
+  rejected.on('error', () => {});
+  sockets.push(rejected);
+  const rejection = new Promise(resolve => rejected.on('data', chunk => {
+    if (chunk.toString().includes('403 Forbidden')) resolve();
+  }));
+  rejected.write(`GET /ws/session/${'Z'.repeat(43)} HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: ${randomBytes(16).toString('base64')}\r\nOrigin: ${url}\r\n\r\n`);
+  const [serverRejected] = await second;
+  await rejection;
+
+  const peerClosed = [serverPartial, serverRejected].map(socket => new Promise(resolve => socket.once('close', resolve)));
+  const shutdown = Promise.all([gateway.close(), ...peerClosed]);
+  await new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error('gateway.close() left incomplete HTTP sockets alive')), 1500);
+    shutdown.then(() => { clearTimeout(timeout); resolve(); }, error => { clearTimeout(timeout); reject(error); });
+  });
+  assert.equal(serverPartial.destroyed, true);
+  assert.equal(serverRejected.destroyed, true);
+});
+
 test('refuses non-loopback bind', () => {
   assert.throws(() => createGateway({ host: '0.0.0.0' }), /loopback/);
   assert.throws(() => createGateway({ allowedPorts: [] }), /allowlist/);
@@ -293,8 +428,13 @@ test('a trickling RFB banner cannot extend the upstream handshake deadline', asy
   client.write(`GET ${ticket.wsPath} HTTP/1.1\r\nHost: 127.0.0.1:${new URL(url).port}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: ${randomBytes(16).toString('base64')}\r\nOrigin: ${url}\r\n\r\n`);
   const [serverSocket] = await upstreamAccepted;
   // The absolute deadline is five seconds; leave scheduling slack without
-  // letting an idle-timeout-only implementation pass.
-  await once(serverSocket, 'close', { signal: AbortSignal.timeout(5800) });
+  // letting an idle-timeout-only implementation pass. TCP reset can emit
+  // ECONNRESET just before 'close'; that is successful cleanup, not failure.
+  serverSocket.on('error', () => {});
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('trickling RFB socket exceeded 5800ms close deadline')), 5800);
+    serverSocket.once('close', () => { clearTimeout(timer); resolve(); });
+  });
 });
 
 test('quiet authorized sessions survive multiple WebSocket heartbeats', async t => {

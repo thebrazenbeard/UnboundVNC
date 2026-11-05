@@ -9,6 +9,7 @@ const MAX_BUFFERED = MAX_FRAME + 14;
 const TICKET_MS = 30_000;
 const HEARTBEAT_MS = 30_000;
 const MAX_SOCKETS = 8;
+const MAX_PENDING_HTTP_SOCKETS = 16;
 const CLOSE_GRACE_MS = 500;
 const utf8 = new TextDecoder('utf-8', { fatal: true });
 
@@ -79,9 +80,32 @@ export function createGateway({ port = 6081, host = '127.0.0.1', allowedPorts = 
   const permittedPorts = new Set(allowedPorts);
   const tickets = new Map();
   const connections = new Set();
+  const pendingHttpSockets = new Set();
+  const upgradedSockets = new WeakSet();
   let localPort = port;
 
+  // Incomplete HTTP headers have not reached either request or upgrade, so
+  // MAX_SOCKETS cannot count them. An absolute deadline must not be reset by
+  // a slow peer's repeated bytes (unlike a socket inactivity timeout).
+  const headerDeadlines = new WeakMap();
+  function clearHeaderDeadline(socket) {
+    const deadline = headerDeadlines.get(socket);
+    if (deadline) clearTimeout(deadline);
+    headerDeadlines.delete(socket);
+  }
+  function armHeaderDeadline(socket) {
+    clearHeaderDeadline(socket);
+    const deadline = setTimeout(() => socket.destroy(), 5_000);
+    deadline.unref();
+    headerDeadlines.set(socket, deadline);
+  }
   const server = createServer(async (req, res) => {
+    const httpSocket = req.socket;
+    // Finish each tiny HTTP API transaction inside the deadline and re-arm
+    // it for a possible next request over the same keep-alive connection.
+    res.once('finish', () => {
+      if (!httpSocket.destroyed && !upgradedSockets.has(httpSocket)) armHeaderDeadline(httpSocket);
+    });
     if (!validHostHeader(req, localPort)) return sendJson(res, 403, { error: 'invalid_host' });
     if (req.url === '/api/health' && req.method === 'GET') {
       return sendJson(res, 200, { ok: true, transport: 'local-rfb-websocket', remoteAccess: false });
@@ -115,6 +139,16 @@ export function createGateway({ port = 6081, host = '127.0.0.1', allowedPorts = 
     }
   });
 
+  server.on('connection', socket => {
+    if (pendingHttpSockets.size >= MAX_PENDING_HTTP_SOCKETS) return socket.destroy();
+    pendingHttpSockets.add(socket);
+    armHeaderDeadline(socket);
+    socket.once('close', () => {
+      pendingHttpSockets.delete(socket);
+      clearHeaderDeadline(socket);
+    });
+  });
+
   server.on('upgrade', (req, ws, head) => {
     if (!validHostHeader(req, localPort) || !validOrigin(req, localPort)) return rejectUpgrade(ws);
     const match = /^\/ws\/session\/([A-Za-z0-9_-]{43})$/.exec(req.url ?? '');
@@ -129,6 +163,12 @@ export function createGateway({ port = 6081, host = '127.0.0.1', allowedPorts = 
     if (req.headers.upgrade?.toLowerCase() !== 'websocket' || !req.headers.connection?.toLowerCase().split(',').map(s => s.trim()).includes('upgrade') || req.headers['sec-websocket-version'] !== '13' || decoded.length !== 16 || Buffer.from(decoded).toString('base64') !== key) {
       return rejectUpgrade(ws, 400);
     }
+
+    // Only a validated one-use ticket/WebSocket handshake graduates from the
+    // short-lived HTTP admission pool to the eight-session WS/RFB pool.
+    upgradedSockets.add(ws);
+    pendingHttpSockets.delete(ws);
+    clearHeaderDeadline(ws);
 
     const rfb = connect({ host: '127.0.0.1', port: ticket.port });
     let upgraded = false;
@@ -309,6 +349,7 @@ export function createGateway({ port = 6081, host = '127.0.0.1', allowedPorts = 
       return `http://127.0.0.1:${localPort}`;
     },
     async close() {
+      for (const socket of pendingHttpSockets) socket.destroy();
       for (const c of connections) c();
       await new Promise((resolve, reject) => server.close(err => err ? reject(err) : resolve()));
     },
