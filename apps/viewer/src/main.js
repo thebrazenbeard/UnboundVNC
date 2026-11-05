@@ -96,7 +96,7 @@ app.innerHTML = `
     </div><div id="session-stage" class="session-stage"><div id="remote-screen" aria-label="Remote desktop framebuffer"></div></div>
     <div class="session-footnote">Ctrl+Alt+Shift+Escape returns keyboard focus from the remote canvas to session controls. View-only is a viewer control, not host-side authorization. Gateway-to-host traffic may not be encrypted.</div>
   </section>
-  <dialog id="device-dialog" class="modal"><form id="device-form" method="dialog"><div class="modal-header"><div><p class="section-kicker">DEVICE PROFILE</p><h2 id="device-modal-title">Add a device</h2></div><button class="modal-x" type="button" data-close="device-dialog" aria-label="Close">${glyph.close}</button></div>
+  <dialog id="device-dialog" class="modal" aria-labelledby="device-modal-title"><form id="device-form" method="dialog"><div class="modal-header"><div><p class="section-kicker">DEVICE PROFILE</p><h2 id="device-modal-title">Add a device</h2></div><button class="modal-x" type="button" data-close="device-dialog" aria-label="Close">${glyph.close}</button></div>
     <label>Device name <input name="name" maxlength="64" required placeholder="e.g. Lappy"/></label>
     <label>Hostname or IP <input name="host" maxlength="253" required placeholder="192.168.1.25"/></label>
     <label>RFB port <input name="port" type="number" min="1" max="65535" required value="5900"/></label>
