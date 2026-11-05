@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
@@ -23,7 +23,12 @@ function loadPlaywright() {
 async function run() {
   const { chromium } = loadPlaywright();
   let browser;
+  let context;
+  let page;
   let server;
+  let screenshotDir;
+  let succeeded = false;
+  const browserEvents = [];
   try {
     // Launch first so a missing browser binary cannot leave a dev server behind.
     browser = await chromium.launch({ headless: true });
@@ -35,12 +40,16 @@ async function run() {
     await server.listen();
     const { port } = server.httpServer.address();
     const baseUrl = `http://127.0.0.1:${port}`;
-    const screenshotDir = process.env.UNBOUNDVNC_SCREENSHOT_DIR
+    screenshotDir = process.env.UNBOUNDVNC_SCREENSHOT_DIR
       ? path.resolve(process.env.UNBOUNDVNC_SCREENSHOT_DIR)
       : await mkdtemp(path.join(os.tmpdir(), 'unboundvnc-browser-'));
     await mkdir(screenshotDir, { recursive: true });
 
-    const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+    context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+    await context.tracing.start({ screenshots: true, snapshots: true, sources: true });
+    page = await context.newPage();
+    page.on('console', event => browserEvents.push({ type: `console.${event.type()}`, text: event.text() }));
+    page.on('pageerror', error => browserEvents.push({ type: 'pageerror', text: error.message }));
     // This tests viewer UI behavior, not a remote server. Keep all session traffic mocked.
     await page.route('**/api/health', route => route.fulfill({
       status: 503, contentType: 'application/json', body: '{"ok":false}',
@@ -54,6 +63,15 @@ async function run() {
     await page.getByText('Local gateway offline').waitFor();
     assert.equal(await page.locator('.device-card').count(), 0);
 
+    await page.locator('#nav-add').click();
+    assert.equal(await page.getByRole('dialog', { name: 'Add a device' }).isVisible(), true,
+      'device dialog has an accessible name');
+    assert.equal(await page.locator('#device-form input[name="name"]').evaluate(element => element === document.activeElement), true,
+      'initial dialog focus moves to the device name');
+    await page.keyboard.press('Escape');
+    assert.equal(await page.locator('#device-dialog').isVisible(), false, 'Escape closes add-device dialog');
+    assert.equal(await page.locator('#nav-add').evaluate(element => element === document.activeElement), true,
+      'closing the dialog returns focus to its trigger');
     await page.locator('#nav-add').click();
     await page.locator('#device-form input[name="name"]').fill('Synthetic Test PC');
     await page.locator('#device-form input[name="host"]').fill('127.0.0.1');
@@ -83,8 +101,22 @@ async function run() {
     await page.locator('#quick-host').waitFor();
     const mobileImage = path.join(screenshotDir, 'dashboard-mobile.png');
     await page.screenshot({ path: mobileImage, fullPage: true });
+    assert.equal(browserEvents.filter(event => event.type === 'pageerror').length, 0,
+      'viewer has no uncaught browser exceptions');
+    succeeded = true;
     console.log(JSON.stringify({ outcome: 'PASS', browser: browser.version(), baseUrl, desktopImage, mobileImage }));
   } finally {
+    if (page && screenshotDir && !page.isClosed() && !succeeded) {
+      await page.screenshot({ path: path.join(screenshotDir, 'failure.png'), fullPage: true }).catch(() => {});
+    }
+    if (context && screenshotDir) {
+      await context.tracing.stop({ path: path.join(screenshotDir, 'trace.zip') }).catch(error => {
+        browserEvents.push({ type: 'trace.error', text: error.message });
+      });
+      await writeFile(path.join(screenshotDir, 'browser-events.json'), JSON.stringify(browserEvents, null, 2));
+      console.log(`Browser evidence directory: ${screenshotDir}`);
+    }
+    await context?.close();
     await browser?.close();
     await server?.close();
   }

@@ -1,0 +1,46 @@
+name: Viewer Chromium smoke (synthetic, loopback)
+
+on:
+  pull_request:
+    paths:
+      - 'apps/viewer/**'
+      - '.github/workflows/viewer-chromium-smoke.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  browser-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    defaults:
+      run:
+        working-directory: apps/viewer
+    env:
+      UNBOUNDVNC_SCREENSHOT_DIR: ${{ github.workspace }}/artifacts/viewer-chromium
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: apps/viewer/package-lock.json
+      - name: Install viewer dependencies
+        run: npm ci
+      - name: Install Playwright test runtime (not bundled in product)
+        run: npm install --no-save --package-lock=false --ignore-scripts playwright@1.56.1
+      - name: Install actual Chromium and Linux dependencies
+        run: npx playwright install --with-deps chromium
+      - name: Execute synthetic browser smoke and capture trace/screenshots
+        run: node e2e/smoke.mjs
+      - name: Upload genuine browser artifacts, including on test failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: viewer-chromium-evidence
+          path: artifacts/viewer-chromium/
+          if-no-files-found: warn
+          retention-days: 7
