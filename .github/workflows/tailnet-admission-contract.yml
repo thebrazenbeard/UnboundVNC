@@ -17,7 +17,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
-      - name: Offline fake-peer and replay checks (no tailnet)
-        run: node --test tests/security/tailnet/mock-admission.test.mjs
+      - name: Fake-peer model plus real loopback gateway boundary (no tailnet)
+        run: node --test tests/security/tailnet/*.test.mjs
       - name: Existing loopback-only gateway regressions
         run: npm test --prefix apps/gateway
