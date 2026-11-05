@@ -1,11 +1,13 @@
 # CI-only per-user-shaped folder transaction. No registry, installer, service, firewall, or shortcut effects.
 param(
   [Parameter(Mandatory)]
-  [ValidateSet('PreviewInstall', 'ApplyTest', 'PreviewUninstall', 'RemoveTest')]
+  [ValidateSet('PreviewInstall', 'ApplyTest', 'PreviewUninstall', 'RemoveTest', 'RecoverTest')]
   [string]$Operation,
   [Parameter(Mandatory)][string]$SandboxRoot,
   [switch]$InjectCopyFailure,
-  [switch]$InjectRemovalFailure
+  [switch]$InjectRemovalFailure,
+  [switch]$CrashPauseAfterCopy,
+  [switch]$CrashPauseAfterMove
 )
 
 Set-StrictMode -Version Latest
@@ -32,6 +34,7 @@ $recovery = Join-Path $appParent '.UnboundVNCViewer.recovery'
 $marker = Join-Path $root '.unboundvnc-viewer-preview-owned'
 $receipt = Join-Path $root '.unboundvnc-viewer-preview-receipt.json'
 $receiptTemp = Join-Path $root '.unboundvnc-viewer-preview-receipt.tmp'
+$journal = Join-Path $root '.unboundvnc-viewer-preview-journal.json'
 
 function Assert-NoReparse([string]$path) {
   if (-not (Test-Path -LiteralPath $path)) { return }
@@ -119,8 +122,55 @@ function Write-State($state) {
   Move-Item -LiteralPath $receiptTemp -Destination $receipt -Force
 }
 
+function Write-Journal([string]$phase, $inventory) {
+  $entry = [pscustomobject]@{
+    schema = 1; id = $id; phase = $phase
+    appRelative = 'User/LocalAppData/Programs/UnboundVNCViewer'
+    inventory = $inventory
+  }
+  # A temporary journal update plus rename prevents truncated JSON on a killed writer.
+  $next = Join-Path $root '.unboundvnc-viewer-preview-journal.next'
+  Set-Content -LiteralPath $next -Value (ConvertTo-Json -InputObject $entry -Depth 12) -NoNewline
+  Move-Item -LiteralPath $next -Destination $journal -Force
+}
+
+function Wait-ForTestCrash([string]$phase) {
+  Write-Host "CRASH CHECKPOINT READY: $phase. Awaiting test-controller process termination."
+  $deadline = [DateTime]::UtcNow.AddMinutes(2)
+  while ([DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 200 }
+  throw 'Crash checkpoint was not terminated by the hosted test controller.'
+}
+
+function Assert-RecoveryLayout([string]$payload) {
+  Assert-NoReparse $root
+  $allowedFiles = @($marker, $journal)
+  foreach ($file in @(Get-ChildItem -LiteralPath $root -Recurse -File -Force)) {
+    $inPayload = $file.FullName.StartsWith($payload + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)
+    if (-not $inPayload -and $file.FullName -notin $allowedFiles) {
+      throw "Recovery refuses unknown outside-payload file: $($file.FullName)"
+    }
+  }
+  $parents = @(
+    (Join-Path $root 'User'),
+    (Join-Path $root 'User/LocalAppData'),
+    (Join-Path $root 'User/LocalAppData/Programs'),
+    $appParent,
+    $payload
+  )
+  foreach ($dir in @(Get-ChildItem -LiteralPath $root -Recurse -Directory -Force)) {
+    $inPayload = $dir.FullName.StartsWith($payload + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)
+    if (-not $inPayload -and $dir.FullName -notin $parents) {
+      throw "Recovery refuses unknown outside-payload directory: $($dir.FullName)"
+    }
+  }
+}
+
 if ($InjectCopyFailure -and $Operation -ne 'ApplyTest') { throw 'Copy injection belongs only to ApplyTest.' }
 if ($InjectRemovalFailure -and $Operation -ne 'RemoveTest') { throw 'Removal injection belongs only to RemoveTest.' }
+if (($CrashPauseAfterCopy -or $CrashPauseAfterMove) -and $Operation -ne 'ApplyTest') {
+  throw 'Crash checkpoints belong only to ApplyTest.'
+}
+if ($CrashPauseAfterCopy -and $CrashPauseAfterMove) { throw 'Select only one crash checkpoint.' }
 
 switch ($Operation) {
   'PreviewInstall' {
@@ -141,16 +191,22 @@ switch ($Operation) {
       $null = New-Item -ItemType Directory -Path $appParent -Force
       $created = $true
       Set-Content -LiteralPath $marker -Value $id -NoNewline
+      Write-Journal 'copying' $sourceInventory
       Copy-Item -LiteralPath $source -Destination $pending -Recurse -Force
       Assert-InventoryEqual $sourceInventory (Get-Inventory $pending)
+      Write-Journal 'pending-verified' $sourceInventory
+      if ($CrashPauseAfterCopy) { Wait-ForTestCrash 'pending-verified' }
       if ($InjectCopyFailure) { throw 'INTENTIONAL_PREVIEW_COPY_INTERRUPTION' }
       Move-Item -LiteralPath $pending -Destination $appFolder
+      Write-Journal 'app-moved' $sourceInventory
+      if ($CrashPauseAfterMove) { Wait-ForTestCrash 'app-moved' }
       $state = [pscustomobject]@{
         schema = 1; id = $id; status = 'installed'
         appRelative = 'User/LocalAppData/Programs/UnboundVNCViewer'
         inventory = $sourceInventory
       }
       Write-State $state
+      Remove-Item -LiteralPath $journal
       Assert-AppClean (Assert-OwnedRoot)
       Write-Host "PREVIEW APPLY TEST PASS: $($sourceInventory.files.Count) source files match hashes in isolated test-only per-user-shaped app folder."
     } catch {
@@ -168,6 +224,34 @@ switch ($Operation) {
         Write-Host 'PREVIEW APPLY ROLLBACK PASS: injected copy failure left no app, receipt or sandbox.'
       } else { throw $failure }
     }
+  }
+  'RecoverTest' {
+    if (-not (Test-Path -LiteralPath $root -PathType Container) -or
+        -not (Test-Path -LiteralPath $marker -PathType Leaf) -or
+        (Get-Content -LiteralPath $marker -Raw) -cne $id) {
+      throw 'Recovery refuses absent or mismatched owner marker.'
+    }
+    if (-not (Test-Path -LiteralPath $journal -PathType Leaf)) { throw 'No interrupted test transaction journal.' }
+    if ((Test-Path -LiteralPath $receipt) -or (Test-Path -LiteralPath $receiptTemp)) {
+      throw 'Recovery refuses committed/ambiguous receipt; preserving state for review.'
+    }
+    $entry = Get-Content -LiteralPath $journal -Raw | ConvertFrom-Json
+    if ($entry.schema -ne 1 -or $entry.id -cne $id -or
+        $entry.appRelative -cne 'User/LocalAppData/Programs/UnboundVNCViewer' -or
+        $entry.phase -notin @('pending-verified', 'app-moved')) {
+      throw 'Recovery refuses unknown or incomplete transaction phase.'
+    }
+    $sourceInventory = Get-Inventory $source
+    Assert-InventoryEqual $sourceInventory $entry.inventory
+    $hasPending = Test-Path -LiteralPath $pending -PathType Container
+    $hasApp = Test-Path -LiteralPath $appFolder -PathType Container
+    if ($hasPending -eq $hasApp) { throw 'Recovery requires exactly one pending or moved payload.' }
+    $payload = if ($hasPending) { $pending } else { $appFolder }
+    Assert-InventoryEqual $entry.inventory (Get-Inventory $payload)
+    Assert-RecoveryLayout $payload
+    Remove-Item -LiteralPath $root -Recurse -Force
+    if (Test-Path -LiteralPath $root) { throw 'Owned incomplete sandbox still exists after recovery.' }
+    Write-Host "CRASH RECOVERY PASS: $($entry.phase) journal verified; interrupted test-only payload rolled back without touching source or user profile."
   }
   'PreviewUninstall' {
     $state = Assert-OwnedRoot
