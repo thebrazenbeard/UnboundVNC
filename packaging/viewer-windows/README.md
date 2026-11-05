@@ -69,8 +69,11 @@ The source tests exercise the real gateway's local `/api` policy with temporary
 assets, host/origin denials, refused untrusted WS upgrades, a successful
 synthetic loopback RFB WebSocket greeting, and explicit close. The hosted
 Windows workflow additionally launches Electron in a CI-only mode, checks the
-real viewer DOM and local gateway health, then requires process exit and both
-listeners closed. This does not prove an end-user installed remote session.
+real viewer DOM and local gateway health, drives Quick Connect to the repository's
+synthetic loopback RFB fixture, disconnects, then requires process exit and both
+app-owned listeners closed. It uploads only a credential-free **dashboard PNG**,
+not an executable or remote framebuffer. This does not prove a real user-host
+session, installed viewer, or secure remote transport.
 
 ## Missing release and usability gates
 

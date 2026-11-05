@@ -65,15 +65,27 @@ jobs:
           if ($env:RUNNER_ENVIRONMENT -ne 'github-hosted') { throw 'Refusing a non-GitHub-hosted runner.' }
           $exe = Join-Path $env:RUNNER_TEMP 'unboundvnc-viewer-desktop-check/UnboundVNCViewer-win32-x64/UnboundVNCViewer.exe'
           $receipt = Join-Path $env:RUNNER_TEMP 'unboundvnc-viewer-desktop-smoke.json'
+          $fixtureReceipt = Join-Path $env:RUNNER_TEMP 'unboundvnc-viewer-fixture-port.txt'
           if (Test-Path -LiteralPath $receipt) { throw 'Refusing stale smoke receipt.' }
-          $env:UNBOUNDVNC_DESKTOP_CI_SMOKE = '1'
-          $process = Start-Process -FilePath $exe -PassThru
+          if (Test-Path -LiteralPath $fixtureReceipt) { throw 'Refusing stale fixture receipt.' }
+          $fixture = Start-Process -FilePath 'node.exe' -ArgumentList 'packaging/viewer-windows/tests/ci-rfb-fixture.mjs' -PassThru
+          $process = $null
           try {
+            $deadline = [DateTime]::UtcNow.AddSeconds(15)
+            while (-not (Test-Path -LiteralPath $fixtureReceipt) -and [DateTime]::UtcNow -lt $deadline) {
+              Start-Sleep -Milliseconds 100
+            }
+            if (-not (Test-Path -LiteralPath $fixtureReceipt)) { throw 'Synthetic fixture failed to start.' }
+            $port = [int](Get-Content -LiteralPath $fixtureReceipt -Raw)
+            if ($port -lt 1 -or $port -gt 65535) { throw 'Invalid synthetic fixture port.' }
+            $env:UNBOUNDVNC_CI_FIXTURE_PORT = [string]$port
+            $env:UNBOUNDVNC_DESKTOP_CI_SMOKE = '1'
+            $process = Start-Process -FilePath $exe -PassThru
             if (-not $process.WaitForExit(45000)) { throw 'Desktop app did not exit after CI smoke.' }
             if ($process.ExitCode -ne 0) { throw "Desktop app exited $($process.ExitCode)." }
             if (-not (Test-Path -LiteralPath $receipt -PathType Leaf)) { throw 'No renderer/gateway smoke receipt.' }
             $result = Get-Content -LiteralPath $receipt -Raw | ConvertFrom-Json
-            if ($result.renderer -ne 'loaded') { throw 'Renderer was not verified.' }
+            if ($result.renderer -ne 'loaded' -or $result.session -ne 'synthetic-rfb-connected') { throw 'Renderer/RFB was not verified.' }
             foreach ($uri in @($result.url, $result.gatewayUrl)) {
               $endpoint = [uri]$uri
               if ($endpoint.Host -ne '127.0.0.1') { throw 'Non-loopback endpoint in smoke receipt.' }
@@ -84,8 +96,18 @@ jobs:
                 if ($stillOpen) { throw "Desktop server remained listening after exit: $endpoint" }
               } finally { $client.Dispose() }
             }
-            Write-Host 'RUNTIME CI ONLY: desktop EXE launched, actual viewer DOM rendered, gateway health responded, process exited and both loopback listeners stopped.'
+            Write-Host 'RUNTIME CI ONLY: desktop EXE launched, dashboard rendered, Quick Connect negotiated synthetic RFB, session disconnected, process exited, both app-owned loopback listeners stopped.'
           } finally {
-            if (-not $process.HasExited) { $process.Kill() }
+            if ($process -and -not $process.HasExited) { $process.Kill() }
+            if ($fixture -and -not $fixture.HasExited) { $fixture.Kill() }
             Remove-Item Env:UNBOUNDVNC_DESKTOP_CI_SMOKE -ErrorAction SilentlyContinue
+            Remove-Item Env:UNBOUNDVNC_CI_FIXTURE_PORT -ErrorAction SilentlyContinue
           }
+
+      - name: Upload only credential-free desktop dashboard screenshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-viewer-dashboard-ci
+          path: ${{ runner.temp }}/unboundvnc-viewer-dashboard.png
+          retention-days: 1
+          if-no-files-found: error

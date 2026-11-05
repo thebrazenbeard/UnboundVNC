@@ -8,6 +8,18 @@ let window;
 let local;
 let stopping = false;
 
+if (process.env.UNBOUNDVNC_DESKTOP_CI_SMOKE === '1') {
+  if (process.env.GITHUB_ACTIONS !== 'true' ||
+      process.env.RUNNER_ENVIRONMENT !== 'github-hosted' ||
+      process.env.RUNNER_OS !== 'Windows' || !process.env.RUNNER_TEMP) {
+    throw new Error('CI smoke and screenshots are forbidden outside hosted Windows Actions');
+  }
+  const { mkdirSync } = require('node:fs');
+  const isolatedProfile = join(process.env.RUNNER_TEMP, 'unboundvnc-viewer-ci-empty-profile');
+  mkdirSync(isolatedProfile);
+  app.setPath('userData', isolatedProfile);
+}
+
 if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
@@ -18,9 +30,17 @@ if (!app.requestSingleInstanceLock()) {
       const [{ startLocalViewer }, { createGateway }] = await Promise.all([
         moduleAt('local-server.mjs'), moduleAt('runtime/gateway/server.mjs'),
       ]);
+      const isHostedSmoke = process.env.UNBOUNDVNC_DESKTOP_CI_SMOKE === '1' &&
+        process.env.GITHUB_ACTIONS === 'true' &&
+        process.env.RUNNER_ENVIRONMENT === 'github-hosted' &&
+        process.env.RUNNER_OS === 'Windows' && Boolean(process.env.RUNNER_TEMP);
+      const fixturePort = isHostedSmoke ? Number(process.env.UNBOUNDVNC_CI_FIXTURE_PORT) : null;
+      if (isHostedSmoke && (!Number.isInteger(fixturePort) || fixturePort < 1 || fixturePort > 65535)) {
+        throw new Error('Hosted desktop smoke requires a valid synthetic fixture port.');
+      }
       local = await startLocalViewer({
         staticRoot: join(__dirname, 'runtime/viewer'), createGateway,
-        allowedPorts: [5900, 5901],
+        allowedPorts: isHostedSmoke ? [5900, 5901, fixturePort] : [5900, 5901],
       });
       const trustedOrigin = new URL(local.url).origin;
       session.defaultSession.setPermissionRequestHandler((_wc, _permission, done) => done(false));
@@ -41,8 +61,7 @@ if (!app.requestSingleInstanceLock()) {
       window.show();
       window.on('closed', () => { window = null; void stop(); });
       if (process.env.UNBOUNDVNC_DESKTOP_CI_SMOKE === '1') {
-        if (process.env.GITHUB_ACTIONS !== 'true' ||
-            process.env.RUNNER_ENVIRONMENT !== 'github-hosted' || !process.env.RUNNER_TEMP) {
+        if (!isHostedSmoke) {
           throw new Error('Desktop smoke mode is limited to an ephemeral GitHub-hosted runner');
         }
         const deadline = Date.now() + 15_000;
@@ -57,8 +76,33 @@ if (!app.requestSingleInstanceLock()) {
         const health = await fetch(new URL('/api/health', local.url));
         if (!health.ok || !(await health.json()).ok) throw new Error('Desktop gateway was not reachable');
         const { writeFile } = require('node:fs/promises');
+        const screenshot = await window.webContents.capturePage();
+        await writeFile(join(process.env.RUNNER_TEMP, 'unboundvnc-viewer-dashboard.png'), screenshot.toPNG());
+        await window.webContents.executeJavaScript(`
+          (() => {
+            const form = document.querySelector('#quick-form');
+            form.elements.host.value = '127.0.0.1';
+            form.elements.port.value = '${fixturePort}';
+            form.requestSubmit();
+          })()
+        `);
+        const sessionDeadline = Date.now() + 15_000;
+        let sessionReady = false;
+        while (Date.now() < sessionDeadline && !sessionReady) {
+          const view = await window.webContents.executeJavaScript(`(() => ({
+            status: document.querySelector('#session-status')?.textContent ?? '',
+            canvas: Boolean(document.querySelector('#remote-screen canvas')),
+            error: document.querySelector('#connection-error-message')?.textContent ?? ''
+          }))()`);
+          if (view.error) throw new Error(`Synthetic loopback viewer connection failed: ${view.error}`);
+          sessionReady = view.status.startsWith('Connected') && view.canvas;
+          if (!sessionReady) await new Promise(done => setTimeout(done, 100));
+        }
+        if (!sessionReady) throw new Error('Desktop viewer did not negotiate the synthetic RFB session.');
+        // Explicit user-visible session disconnect; no screenshot of framebuffer.
+        await window.webContents.executeJavaScript("document.querySelector('#session-disconnect').click()");
         await writeFile(join(process.env.RUNNER_TEMP, 'unboundvnc-viewer-desktop-smoke.json'), JSON.stringify({
-          renderer: 'loaded', url: local.url, gatewayUrl: local.gatewayUrl,
+          renderer: 'loaded', session: 'synthetic-rfb-connected', url: local.url, gatewayUrl: local.gatewayUrl,
         }));
         await stop();
       }
