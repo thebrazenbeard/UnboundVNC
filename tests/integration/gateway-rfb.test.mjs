@@ -172,3 +172,56 @@ test('RFB bytes traverse local gateway to a synthetic RFB server', async t => {
   clients.push(replay);
   assert.match(await replay.headers(), /^HTTP\/1\.1 403/);
 });
+
+// RFC 6143 Appendix A: RFB 3.3 and 3.7 have different None security
+// handshakes from 3.8. Check the genuine TCP→gateway→masked WS byte path
+// without treating these insecure synthetic fixtures as remote-host security.
+for (const version of ['3.3', '3.7']) {
+  test(`RFB ${version} legacy None negotiation and Raw pixels pass through the loopback gateway`, async t => {
+    const rfb = await createRfbFixture({ version }).start();
+    const gateway = createGateway({ port: 0, allowedPorts: [rfb.port] });
+    const origin = await gateway.listen();
+    const clients = [];
+    t.after(async () => {
+      for (const client of clients) client.socket.destroy();
+      await gateway.close();
+      await rfb.close();
+    });
+
+    const response = await fetch(origin + '/api/sessions', {
+      method: 'POST',
+      headers: { Origin: origin, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ host: '127.0.0.1', port: rfb.port }),
+    });
+    assert.equal(response.status, 201);
+    const ticket = await response.json();
+    const client = await openWs(origin, ticket.wsPath);
+    clients.push(client);
+    assert.match(await client.headers(), /^HTTP\/1\.1 101 Switching Protocols/);
+    const banner = `RFB 003.00${version.at(-1)}\n`;
+    assert.equal((await client.read(12)).toString('ascii'), banner);
+    client.write(Buffer.from(banner, 'ascii'));
+    if (version === '3.3') {
+      assert.equal((await client.read(4)).readUInt32BE(), 1, '3.3 server-selected None');
+    } else {
+      assert.deepEqual(await client.read(2), Buffer.from([1, 1]), '3.7 SecurityTypes list');
+      client.write(Buffer.from([1]));
+    }
+    // Neither 3.3 nor 3.7 sends SecurityResult after SecurityType None.
+    // A spurious four-byte result shifts this ServerInit and fails dimensions.
+    client.write(Buffer.from([1])); // shared ClientInit
+    const init = await client.read(24);
+    assert.equal(init.readUInt16BE(0), 2);
+    assert.equal(init.readUInt16BE(2), 2);
+    assert.equal(init[4], 32);
+    assert.equal((await client.read(init.readUInt32BE(20))).toString(), fixtureProtocol.DESKTOP_NAME);
+    client.write(Buffer.from([3, 0, 0, 0, 0, 0, 0, 2, 0, 2]));
+    const update = await client.read(16);
+    assert.equal(update[0], 0);
+    assert.equal(update.readUInt16BE(2), 1);
+    assert.equal(update.readUInt16BE(8), 2);
+    assert.equal(update.readUInt16BE(10), 2);
+    assert.equal(update.readInt32BE(12), 0);
+    assert.deepEqual(await client.read(16), fixtureProtocol.PIXELS);
+  });
+}
