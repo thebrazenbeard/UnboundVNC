@@ -3,11 +3,12 @@ using System.Runtime.InteropServices;
 using UnboundVnc.Host.Windows;
 
 if (args.Length != 1 || !File.Exists(args[0]))
-    throw new ArgumentException("Pass the built Windows host EXE for assembly policy inspection.");
+    throw new ArgumentException("Pass the built Windows host managed DLL for policy inspection.");
 
 Check("actual host assembly has no new user32 input-effect import", () =>
 {
     var host = Assembly.LoadFrom(Path.GetFullPath(args[0]));
+    Require(host.GetName().Name == "UnboundVnc.Host.Windows", "inspecting an unexpected managed assembly");
     var allowedUser32 = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         { "OpenInputDesktop", "GetUserObjectInformationW", "CloseDesktop" };
     var prohibited = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
