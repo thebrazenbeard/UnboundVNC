@@ -68,10 +68,11 @@ Gate: reviewer confirms the exact key bytes used for fingerprinting, the pin sco
 - Integrate and hostile-review **draft PR #6** against the viewer's declared `POST /api/sessions {host, port}` and opaque `{id, wsPath, expiresAt}` contract. The reviewed heads bind/dial loopback only; the newer one reports seven gateway tests and adds RFB greeting/port restrictions. Confirm one-time/short-lived WebSocket admission bound to actual local user identity (Origin/Host checks alone are not OS-user authentication), strict CSRF checks, bounded concurrency/size/time, no raw credentials, ticket cleanup and disconnect semantics.
 - Resolve and authorize targets safely: explicit host/port rules, DNS resolution/rebinding checks, no arbitrary HTTP/metadata/loopback pivot proxy, rejection of unexpected local or private targets according to policy.
 - Default listeners to `127.0.0.1`; do not add a firewall exception or public WebSocket/RFB listener by default.
+- Bound per-frame allocations, queued bytes, concurrent sessions and sustained rate separately. A **cumulative lifetime transfer allowance is not a memory cap**: the reviewed gateway #6 head disconnects after 64 MiB total transferred in either direction, and also disconnects after 120 seconds idle. Replace both with explicit, tested ongoing-session resource and inactivity policies; test repeated framebuffer updates beyond 64 MiB without unbounded buffering, slow-reader backpressure, and quiet but authorized sessions.
 - Integrate **draft PR #5**'s synthetic RFB fixture as a test-only dependency, then execute against **two independent maintained RFB server implementations**. Cover RFB versions and supported security types, valid/invalid credentials, encodings, framebuffer, cursor, pointer/keyboard, disconnect, timeouts, and failure cleanup. None-auth synthetic tests must stay loopback-only.
 - Explicitly verify the **entire transport path**: browser→gateway `wss://` says nothing about gateway→RFB server encryption. With noVNC 1.7 and TigerVNC `x0vncserver` defaults (`TLSVnc,VncAuth`), upstream source suggests VeNCrypt can still select classic unencrypted VNC authentication. Capture negotiated security type/subtype and negative-test downgrade; do not infer TLS merely from the VeNCrypt umbrella or an encrypted WebSocket leg.
 
-Gate: combined viewer→gateway→fixture success **and** actual local framebuffer + permitted input + disconnect against independent servers, plus origin/target/ticket/replay/timeout/security-subtype negative tests. Treat `None`/classic VNC auth as isolated interoperability only, not Internet security. The predicted TigerVNC downgrade remains SOURCE_INSPECTION/UNKNOWN pending captured wire evidence.
+Gate: combined viewer→gateway→fixture success **and** actual local framebuffer + permitted input + disconnect against independent servers, sustained streaming/idle survival, plus origin/target/ticket/replay/timeout/security-subtype negative tests. Treat `None`/classic VNC auth as isolated interoperability only, not Internet security. The predicted TigerVNC downgrade remains SOURCE_INSPECTION/UNKNOWN pending captured wire evidence.
 
 ### Slice 2 — Real attended Windows host
 
@@ -81,7 +82,7 @@ Gate: combined viewer→gateway→fixture success **and** actual local framebuff
 - Record a capture-API/OS-version decision (DXGI vs WGC) and explicitly bind each worker/grant to a Windows session ID and controller ID. Invalidate capture and input epochs on WTS session switch, lock/logoff, loss of capture, or revocation; never replay queued input into a new desktop.
 - Test keyboard layout/IME/modifier state, mouse/button release, multiple screens at mixed DPI, session switches, sleep/resume, GPU reset, capture loss, and crash cleanup.
 
-Gate: two physically distinct Windows machines prove both directions of host/viewer operation, recorded under exact binary SHAs and host conditions. **Planned testbed (not accessed or probed here):** inventory Lappy, VN1 and VN2 for OS edition, logged-in sessions, rights, GPU/displays, current workload and tunnel readiness; then rotate Lappy→VN1, VN1→VN2, VN2→Lappy, reverse each direction, and separately test denied sessions, lock/UAC, multi-monitor hotplug and restart. Use only user-authorized real-host sessions after live readiness checks. Synthetic X11/WSL GUI success **does not** count as Windows desktop control.
+**Slice 2 local gate:** On one authorized Windows machine, prove interactive-session framebuffer capture, input gating, visible local approval, deny/revoke and teardown through an isolated loopback RFB path. Record exact binary SHA, Windows build, user/session context and outcomes. Do not falsely require two-machine connectivity here: the current gateway is loopback-only and Slice 3 has not delivered authenticated encrypted cross-host transport. A synthetic X11/WSL GUI does **not** count as Windows desktop control.
 
 ### Slice 3 — Trusted identity and private remote connectivity
 
@@ -90,7 +91,7 @@ Gate: two physically distinct Windows machines prove both directions of host/vie
 - First connectivity target: direct LAN and optional operator-configured private Tailscale tailnet. Keep it optional and avoid public Funnel exposure. Do not claim Tailscale is self-hosted, or that two restrictive NATs can connect without reachable coordination/relay infrastructure.
 - Possible future independent path: operator-hosted Headscale/DERP where a reachable server and actual $0 resources exist. Custom STUN/ICE/TURN and public vendor relay are not release-1 requirements.
 
-Gate: two hosts connect across real private network paths; wrong peer, dropped/replayed traffic, changed keys, rejected consent, and controller removal all fail closed. Confirm the endpoint encryption claim against the actual path, not UI labels.
+**Slice 3 cross-host gate:** Two physically distinct Windows machines prove both directions of host/viewer operation across an authenticated encrypted private network path, including denied sessions, active revocation and teardown. **Planned testbed (not accessed or probed here):** inventory Lappy, VN1 and VN2 for OS edition, logged-in sessions, rights, GPU/displays, current workload and tunnel readiness; then rotate Lappy→VN1, VN1→VN2, VN2→Lappy and reverse each direction. Test wrong peer, dropped/replayed traffic, changed keys, rejected consent, controller removal, lock/UAC and multi-monitor hotplug. Record binary SHA and conditions for each host; confirm endpoint encryption against the actual network path, not UI labels. Use only currently authorized real-host sessions after live readiness checks. If the path cannot be secured, this gate FAILS and cross-host tests do not proceed.
 
 ### Slice 4 — Attended packaging, then explicit unattended Windows service
 
@@ -136,6 +137,10 @@ Every claim should record exact Git head, dependency versions, host OS/session, 
 > **FAILS:** A privileged service can simply inject through UAC/logon/secure desktop. Session 0, UIPI, and SAS have separate constraints.
 
 > **FAILS:** Universal unattended Internet access can be guaranteed with $0 infrastructure and no reachable broker/relay under restrictive NAT.
+
+> **FAILS:** A lifetime 64 MiB byte counter is a safe substitute for bounded buffering or sustained-session tests; long ordinary RFB sessions will hit that limit. A fixed 120-second no-traffic cutoff likewise needs an explicit user-facing reconnect/keepalive policy.
+
+> **FAILS:** Requiring Lappy/VN1/VN2 cross-host acceptance while only a loopback gateway exists. Local attended Windows behavior must qualify first, then pairing/encrypted transport, then physical cross-host tests.
 
 > **UNKNOWN:** Performance parity, cross-platform support, secure unattended mode, and host-to-host readiness until specific live tests exist.
 
