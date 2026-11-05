@@ -32,10 +32,11 @@ jobs:
       - name: Install independent TigerVNC and X11 event witness
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends tigervnc-standalone-server x11-xserver-utils x11-utils xdotool
+          sudo apt-get install -y --no-install-recommends tigervnc-standalone-server x11-xserver-utils x11-utils xdotool xclip
           command -v Xtigervnc
           command -v xev
           command -v xdotool
+          command -v xclip
       - name: Install viewer and test-only Chromium
         run: |
           npm ci
