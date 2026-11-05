@@ -15,7 +15,17 @@ const state = {
   sessionReturnFocus: null,
   lastFailure: null,
   remoteClipboardText: null,
+  awaitRemoteClipboard: false,
+  clipboardReceiveTimer: null,
 };
+
+const MAX_CLIPBOARD_BYTES = 64 * 1024;
+
+function clipboardTextFits(text) {
+  // UTF-16 .length alone does not bound UTF-8 RFB clipboard payloads.
+  return text.length <= MAX_CLIPBOARD_BYTES &&
+    new TextEncoder().encode(text).byteLength <= MAX_CLIPBOARD_BYTES;
+}
 
 const glyph = {
   monitor: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M8 22h8M12 18v4"/></svg>',
@@ -116,10 +126,10 @@ app.innerHTML = `
     <div class="modal-footer"><button id="credentials-cancel" class="btn btn-quiet" type="button">Disconnect</button><button class="btn btn-primary" type="submit">Authenticate ${glyph.arrow}</button></div>
   </form></dialog>
   <dialog id="session-clipboard-dialog" class="modal" aria-labelledby="session-clipboard-title"><div class="modal-header"><div><p class="section-kicker">SESSION ONLY</p><h2 id="session-clipboard-title">Text clipboard</h2></div></div>
-    <p class="modal-hint">Plain text only. Nothing is read from your local clipboard automatically. Send text intentionally, or copy text offered by the remote server with a separate click. VNC traffic may be unencrypted.</p>
+    <p class="modal-hint">Plain text only (64 KiB UTF-8 limit). Nothing is read from your local clipboard automatically. To copy from the remote computer, arm a one-time receive request, close this dialog, copy text remotely, then reopen here. VNC traffic may be unencrypted.</p>
     <label for="session-clipboard-text">Text to send to remote</label><textarea id="session-clipboard-text" rows="4" maxlength="65536" spellcheck="false" autocomplete="off" placeholder="Paste or type text here"></textarea>
     <p id="session-clipboard-status" class="modal-hint" role="status" aria-live="polite">No remote text received yet.</p>
-    <div class="modal-footer clipboard-footer"><button id="session-clipboard-close" class="btn btn-quiet" type="button">Close</button><button id="session-clipboard-copy" class="btn btn-quiet" type="button" disabled>Copy from remote</button><button id="session-clipboard-send" class="btn btn-primary" type="button">Send to remote</button></div>
+    <div class="modal-footer clipboard-footer"><button id="session-clipboard-close" class="btn btn-quiet" type="button">Close</button><button id="session-clipboard-receive" class="btn btn-quiet" type="button">Receive next remote copy</button><button id="session-clipboard-copy" class="btn btn-quiet" type="button" disabled>Copy from remote</button><button id="session-clipboard-send" class="btn btn-primary" type="button">Send to remote</button></div>
   </dialog>
   <dialog id="identity-dialog" class="modal" aria-labelledby="identity-title"><div class="modal-header"><div><p class="section-kicker">VERIFY YOUR DESTINATION</p><h2 id="identity-title">Confirm server identity</h2></div></div><p id="identity-detail" class="modal-hint">Compare this key fingerprint with one obtained through a trusted, separate channel. Do not approve an unknown or changed fingerprint.</p>
     <p class="modal-hint">SHA-256 server key fingerprint:</p><code id="identity-fingerprint" class="identity-fingerprint" aria-live="polite">Calculating…</code>
@@ -170,6 +180,9 @@ function closeDialog(id) {
 }
 
 function clearSessionClipboard() {
+  if (state.clipboardReceiveTimer) clearTimeout(state.clipboardReceiveTimer);
+  state.clipboardReceiveTimer = null;
+  state.awaitRemoteClipboard = false;
   state.remoteClipboardText = null;
   document.getElementById('session-clipboard-text').value = '';
   document.getElementById('session-clipboard-copy').disabled = true;
@@ -373,11 +386,15 @@ async function connectTo(device, viewOnly = false) {
     });
     rfb.addEventListener('clipboard', event => {
       if (state.connection !== connection || rfb.viewOnly) return;
+      // Ignore unsolicited clipboard data. The user must explicitly arm one
+      // receive request before any remote text enters application memory.
+      if (!state.awaitRemoteClipboard) return;
+      state.awaitRemoteClipboard = false;
       const text = event.detail?.text;
       if (typeof text !== 'string') return;
-      if (text.length > 65536) {
+      if (!clipboardTextFits(text)) {
         clearSessionClipboard();
-        document.getElementById('session-clipboard-status').textContent = 'Remote clipboard text exceeds the 64 KiB limit.';
+        notify('Remote clipboard text exceeds the 64 KiB UTF-8 limit.', 'error');
         return;
       }
       state.remoteClipboardText = text || null;
@@ -385,6 +402,7 @@ async function connectTo(device, viewOnly = false) {
       document.getElementById('session-clipboard-status').textContent = text
         ? 'Remote text is available. Copy it only if you trust this session.'
         : 'Remote clipboard is empty.';
+      if (text) notify('Remote text ready. Open Clipboard to copy it locally.');
     });
     rfb.addEventListener('disconnect', () => {
       if (state.connection !== connection) return;
@@ -498,17 +516,37 @@ document.getElementById('session-clipboard-open').addEventListener('click', () =
   const connection = state.connection;
   if (!connection?.connected || connection.rfb?.viewOnly) return;
   document.getElementById('session-clipboard-dialog').showModal();
+  if (state.awaitRemoteClipboard) {
+    document.getElementById('session-clipboard-status').textContent = 'Waiting for the next remote clipboard copy.';
+  }
   document.getElementById('session-clipboard-text').focus();
 });
 document.getElementById('session-clipboard-close').addEventListener('click', () => {
+  clearSessionClipboard();
   closeDialog('session-clipboard-dialog');
 });
-document.getElementById('session-clipboard-dialog').addEventListener('close', clearSessionClipboard);
+document.getElementById('session-clipboard-dialog').addEventListener('cancel', clearSessionClipboard);
+document.getElementById('session-clipboard-receive').addEventListener('click', () => {
+  if (!state.connection?.connected || state.connection.rfb?.viewOnly) return;
+  clearSessionClipboard();
+  state.awaitRemoteClipboard = true;
+  state.clipboardReceiveTimer = setTimeout(() => {
+    if (!state.awaitRemoteClipboard && state.remoteClipboardText === null) return;
+    clearSessionClipboard();
+    notify('Remote clipboard receive window expired. Arm it again if needed.');
+  }, 60_000);
+  closeDialog('session-clipboard-dialog');
+  notify('Remote clipboard receive armed for one copy. Copy text remotely, then reopen Clipboard.');
+});
 document.getElementById('session-clipboard-send').addEventListener('click', () => {
   const connection = state.connection;
   if (!connection?.connected || connection.rfb?.viewOnly) return;
   const field = document.getElementById('session-clipboard-text');
   if (!field.value) return;
+  if (!clipboardTextFits(field.value)) {
+    document.getElementById('session-clipboard-status').textContent = 'Text exceeds the 64 KiB UTF-8 limit.';
+    return;
+  }
   connection.rfb.clipboardPasteFrom(field.value);
   field.value = '';
   document.getElementById('session-clipboard-status').textContent = 'Text sent to the VNC connection.';
@@ -519,8 +557,7 @@ document.getElementById('session-clipboard-copy').addEventListener('click', asyn
   try {
     await navigator.clipboard.writeText(text);
     if (state.remoteClipboardText === text) {
-      state.remoteClipboardText = null;
-      document.getElementById('session-clipboard-copy').disabled = true;
+      clearSessionClipboard();
     }
     document.getElementById('session-clipboard-status').textContent = 'Remote text copied to your browser clipboard.';
   } catch {
