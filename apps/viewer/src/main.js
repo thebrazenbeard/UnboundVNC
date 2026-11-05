@@ -47,6 +47,11 @@ function dateLabel(value) {
 }
 
 function notify(message, tone = 'info') {
+  // The persistent failure banner already announces this exact error. Do not
+  // duplicate it in a floating toast over narrow-screen connection controls.
+  const failure = document.querySelector('#connection-error');
+  if (tone === 'error' && failure && !failure.hidden &&
+      document.querySelector('#connection-error-message').textContent === message) return;
   const toast = document.createElement('div');
   toast.className = `toast toast-${tone}`;
   toast.setAttribute('role', tone === 'error' ? 'alert' : 'status');
