@@ -33,7 +33,7 @@ function framebufferUpdate(...rectangles) {
 }
 
 function pixels(width, height, red, green, blue) {
-  const value = Buffer.from([blue, green, red, 0]); // 32bpp little-endian BGRX
+  const value = Buffer.from([red, green, blue, 0]); // noVNC requests RGBX via SetPixelFormat
   const bytes = Buffer.alloc(width * height * 4);
   for (let offset = 0; offset < bytes.length; offset += 4) value.copy(bytes, offset);
   return bytes;
@@ -43,10 +43,11 @@ async function waitForCanvas(page, width, height, rgb, label) {
   const handle = await page.waitForFunction(({ width: w, height: h, rgb: expected }) => {
     const canvas = document.querySelector('#remote-screen canvas');
     if (!canvas || canvas.width !== w || canvas.height !== h) return false;
-    const samples = [[0, 0], [Math.floor(w / 2), Math.floor(h / 2)], [w - 1, h - 1]];
-    const values = samples.map(([x, y]) => Array.from(canvas.getContext('2d').getImageData(x, y, 1, 1).data.slice(0, 3)));
-    return values.every(color => color.every((value, i) => value === expected[i]))
-      ? { width: canvas.width, height: canvas.height, samples: values } : false;
+    const data = canvas.getContext('2d').getImageData(0, 0, w, h).data;
+    for (let offset = 0; offset < data.length; offset += 4) {
+      if (!expected.every((value, i) => data[offset + i] === value)) return false;
+    }
+    return { width: canvas.width, height: canvas.height, pixelCount: w * h, rgb: expected };
   }, { width, height, rgb }, { timeout: 10_000 });
   const actual = await handle.jsonValue();
   assert.ok(actual, `${label} pixel oracle failed`);
@@ -62,6 +63,18 @@ async function eventually(predicate, label, timeoutMs = 10_000) {
   throw new Error(`timed out waiting for ${label}`);
 }
 
+function framebufferRequests(connection) {
+  return connection.messages.filter(message => message.type === 'framebuffer-request');
+}
+
+async function expectNextRequest(connection, previousCount, label) {
+  await eventually(() => framebufferRequests(connection).length > previousCount, label);
+  const request = framebufferRequests(connection).at(-1);
+  assert.deepEqual({ width: request.width, height: request.height, x: request.x, y: request.y },
+    { width: WIDTH, height: HEIGHT, x: 0, y: 0 }, `${label} requested stale framebuffer bounds`);
+  assert.equal(request.incremental, true, `${label} did not request an incremental update`);
+}
+
 async function run() {
   let fixture;
   let gateway;
@@ -75,7 +88,11 @@ async function run() {
     fixture.events.on('message', (connection, message) => {
       if (message.type === 'framebuffer-request' && !connection.initialFrameSent) {
         connection.initialFrameSent = true;
-        connection.socket.write(framebufferUpdate(rectangle(RAW, 2, 2, fixtureProtocol.PIXELS)));
+        // The fixture's exported example is BGRX for its default ServerInit;
+        // noVNC explicitly requests RGBX, so swap red and blue per pixel.
+        const initial = Buffer.from(fixtureProtocol.PIXELS);
+        for (let i = 0; i < initial.length; i += 4) [initial[i], initial[i + 2]] = [initial[i + 2], initial[i]];
+        connection.socket.write(framebufferUpdate(rectangle(RAW, 2, 2, initial)));
       }
     });
     gateway = createGateway({ port: 0, allowedPorts: [fixture.port] });
@@ -118,29 +135,38 @@ async function run() {
     // DesktopSize must be followed by a real 4x3 Raw rectangle, not merely a
     // canvas resize. The fixture now accepts the client's new request bounds.
     fixture.resize(WIDTH, HEIGHT);
+    const oldRequests = framebufferRequests(connection).length;
     connection.socket.write(framebufferUpdate(
       rectangle(DESKTOP_SIZE, WIDTH, HEIGHT),
       rectangle(RAW, WIDTH, HEIGHT, pixels(WIDTH, HEIGHT, 0xcc, 0x44, 0x88))));
     samples.push(await waitForCanvas(page, WIDTH, HEIGHT, [0xcc, 0x44, 0x88], 'DesktopSize + Raw'));
+    await expectNextRequest(connection, oldRequests, 'after DesktopSize + Raw');
+    const postResizeRequests = framebufferRequests(connection).length;
     connection.socket.write(framebufferUpdate(rectangle(HEXTILE, WIDTH, HEIGHT,
       Buffer.concat([Buffer.from([1]), pixels(WIDTH, HEIGHT, 0x19, 0x87, 0xde)]))));
     samples.push(await waitForCanvas(page, WIDTH, HEIGHT, [0x19, 0x87, 0xde], 'Hextile Raw tile'));
+    await expectNextRequest(connection, postResizeRequests, 'after Hextile');
+    const postHextileRequests = framebufferRequests(connection).length;
     connection.socket.write(framebufferUpdate(rectangle(TIGHT, WIDTH, HEIGHT,
       Buffer.from([0x80, 0x11, 0xb4, 0x66]))));
     samples.push(await waitForCanvas(page, WIDTH, HEIGHT, [0x11, 0xb4, 0x66], 'Tight Fill'));
+    await expectNextRequest(connection, postHextileRequests, 'after Tight');
 
     // Pointer and keyboard must remain usable at the *new* framebuffer size.
     const canvas = page.locator('#remote-screen canvas');
+    const inputStart = connection.messages.length;
     await canvas.click({ position: { x: 2, y: 2 } });
     await page.keyboard.press('a');
-    await eventually(() => connection.messages.some(message => message.type === 'pointer' &&
+    const subsequentInput = () => connection.messages.slice(inputStart);
+    await eventually(() => subsequentInput().some(message => message.type === 'pointer' &&
       message.x < WIDTH && message.y < HEIGHT && message.mask === 1), 'resized pointer down');
-    await eventually(() => connection.messages.some(message => message.type === 'key' && message.down), 'keyboard after resize');
+    await eventually(() => subsequentInput().some(message => message.type === 'key' &&
+      message.down && message.key === 0x61), 'resized keyboard a keydown');
     assert.deepEqual(errors, [], `strict RFB fixture or browser reported errors: ${errors.join(', ')}`);
     assert.equal(await page.locator('#session-view').isVisible(), true);
     console.log(JSON.stringify({ outcome: 'PASS', browser: browser.version(), rfbVersion: '3.8',
       loopback: true, encodings: [RAW, HEXTILE, TIGHT, DESKTOP_SIZE, CURSOR], samples,
-      resizedInput: connection.messages.filter(message => ['pointer', 'key'].includes(message.type)).slice(-8),
+      resizedInput: subsequentInput().filter(message => ['pointer', 'key'].includes(message.type)),
     }));
   } finally {
     await browser?.close();

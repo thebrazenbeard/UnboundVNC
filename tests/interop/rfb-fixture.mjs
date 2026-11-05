@@ -37,14 +37,20 @@ function serverInit() {
   return Buffer.concat([init, name]);
 }
 
-function rawFramebufferUpdate() {
+function rawFramebufferUpdate(redShift = 16) {
   const header = Buffer.alloc(16);
   header[0] = 0; // FramebufferUpdate
   header.writeUInt16BE(1, 2); // one rectangle
   header.writeUInt16BE(2, 8); // rect width
   header.writeUInt16BE(2, 10); // rect height
   header.writeInt32BE(0, 12); // Raw encoding
-  return Buffer.concat([header, PIXELS]);
+  // A client may request little-endian RGBX (redShift=0), as noVNC does,
+  // instead of the ServerInit BGRX layout (redShift=16).
+  const encoded = redShift === 0 ? Buffer.from([
+    0xff, 0x00, 0x00, 0x00, 0x00, 0xff, 0x00, 0x00,
+    0x00, 0x00, 0xff, 0x00, 0xff, 0xff, 0xff, 0x00,
+  ]) : PIXELS;
+  return Buffer.concat([header, encoded]);
 }
 
 function attachConnection(socket, fixture) {
@@ -120,14 +126,18 @@ function attachConnection(socket, fixture) {
             return;
           }
           const pf = b.subarray(4, 20);
-          // Fixture only sends one fixed 32bpp pixel format; allow clients to
-          // repeat it, but reject format changes we cannot faithfully encode.
+          // The fixture handles both valid 32bpp layouts: the ServerInit BGRX
+          // layout and noVNC's preferred little-endian RGBX layout.
+          const redShift = pf[10];
+          const blueShift = pf[12];
           if (pf[0] !== 32 || pf[1] !== 24 || pf[2] !== 0 || pf[3] !== 1 ||
               pf.readUInt16BE(4) !== 255 || pf.readUInt16BE(6) !== 255 ||
-              pf.readUInt16BE(8) !== 255 || pf[10] !== 16 || pf[11] !== 8 || pf[12] !== 0) {
+              pf.readUInt16BE(8) !== 255 || pf[11] !== 8 ||
+              !((redShift === 16 && blueShift === 0) || (redShift === 0 && blueShift === 16))) {
             fail('unsupported pixel format');
             return;
           }
+          connection.redShift = redShift;
           consumed = 20;
           publish({ type: 'pixel-format' });
         } else if (type === 2) {
@@ -158,7 +168,7 @@ function attachConnection(socket, fixture) {
           publish(request);
           // A full-screen Raw rectangle is sent regardless of requested
           // subrectangle, so consumers should request the full 2x2 screen.
-          if (fixture.autoRespond) socket.write(rawFramebufferUpdate());
+          if (fixture.autoRespond) socket.write(rawFramebufferUpdate(connection.redShift));
         } else if (type === 4) {
           if (b.length < 8) return;
           consumed = 8;
