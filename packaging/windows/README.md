@@ -19,6 +19,21 @@ elevation, persistence, or consent dialog is supplied by these scripts.
 
 1. Independently build and review the attended-host artifact, its source and
    transitive licenses. Record the exact executable SHA-256 and provenance.
+   **Ordinary `dotnet build` output is not suitable:** a framework-dependent
+   WinForms apphost requires its companion DLL, runtimeconfig, deps manifest and
+   installed runtime, while this prototype stages exactly one `.exe`. For a
+   build-only `win-x64` candidate, from the repository root use a trusted
+   Windows .NET 8 SDK:
+
+   ```powershell
+   dotnet publish apps/host-windows/UnboundVnc.Host.Windows.csproj --configuration Release --runtime win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true --output "$env:TEMP\unboundvnc-publish-check"
+   ```
+
+   Verify the output is exactly one `.exe` plus optional nonruntime debug
+   symbols, with no loose `.dll`, `.deps.json`, or `.runtimeconfig.json`.
+   A Windows Actions build gate checks this shape on ephemeral CI only. It does
+   **not** run or install the build, prove startup on clean Windows, establish
+   third-party distribution rights, or make the output a release artifact.
 2. Review both PowerShell scripts before invocation. In PowerShell 5.1, preview:
 
    `./Install-AttendedHost.ps1 -ExePath 'C:\staging\host.exe' -ExpectedSha256 '<64-digit-SHA256>'`
@@ -49,4 +64,9 @@ elevation, persistence, or consent dialog is supplied by these scripts.
 - REVIEW: security/privacy and independent human acceptance before release.
 
 Static contract checks in `tests/test_contract.py` are a source inspection
-guard only; they are **not** PowerShell execution, install tests or a release gate pass.
+guard only. The separate GitHub-hosted Windows runner workflow executes the
+PowerShell scripts against inert dummy bytes under a unique `RUNNER_TEMP`
+sandbox; it checks preview/apply/uninstall, refusal of modified/extra files,
+orphaned partial staging, and unsafe paths. It must not run on self-hosted
+runners or real user workstations. Even a green CI run is not a clean-machine
+installer qualification, native host run, or release gate pass.

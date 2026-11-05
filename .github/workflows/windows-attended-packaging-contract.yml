@@ -1,0 +1,51 @@
+name: Windows attended packaging source contract
+
+on:
+  pull_request:
+    paths:
+      - 'packaging/windows/**'
+      - '.github/workflows/windows-attended-packaging-contract.yml'
+
+# The checked-out PR never receives a write-capable token or credentials.
+permissions:
+  contents: read
+
+jobs:
+  isolated-windows-contract:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out source without persisted credentials
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Source-only static boundaries
+        shell: pwsh
+        run: python -m unittest discover -s packaging/windows/tests -v
+
+      - name: Select .NET 8 SDK for build-only gate
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Compile self-contained single-file Windows host, without executing or publishing it
+        shell: pwsh
+        run: |
+          $publishDir = Join-Path $env:RUNNER_TEMP 'unboundvnc-host-build-check'
+          dotnet publish apps/host-windows/UnboundVnc.Host.Windows.csproj --configuration Release --runtime win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true --output $publishDir
+          if ($LASTEXITCODE -ne 0) { throw 'Windows host publish failed.' }
+          $exe = @(Get-ChildItem -LiteralPath $publishDir -File -Filter '*.exe')
+          if ($exe.Count -ne 1 -or $exe[0].Name -ne 'UnboundVnc.Host.Windows.exe') {
+            throw 'Expected exactly one Windows attended-host executable.'
+          }
+          $looseRuntimeFiles = @(Get-ChildItem -LiteralPath $publishDir -File | Where-Object { $_.Extension -in @('.dll', '.json') })
+          if ($looseRuntimeFiles.Count -ne 0) {
+            throw 'Standalone single-exe gate failed: loose runtime/dependency files remain.'
+          }
+          $sha = (Get-FileHash -LiteralPath $exe[0].FullName -Algorithm SHA256).Hash
+          Write-Host "BUILD GATE ONLY: self-contained single-file Windows host: $($exe[0].Name); SHA256=$sha; never executed, installed, signed or distributed."
+
+      - name: Ephemeral Windows PowerShell preview and rollback contract
+        shell: pwsh
+        run: ./packaging/windows/tests/Invoke-WindowsPackagingContract.ps1
