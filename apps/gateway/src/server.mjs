@@ -274,7 +274,9 @@ export function createGateway({ port = 6081, host = '127.0.0.1', allowedPorts = 
         data.copy(greeting, greetingLength, 0, length);
         greetingLength += length;
         if (greetingLength < 12) return;
-        if (!/^RFB [0-9]{3}\.[0-9]{3}\n$/.test(greeting.toString('ascii'))) {
+        // Node's 'ascii' decoder strips the high bit, so a non-ASCII service
+        // could otherwise be accepted as RFB after lossy normalization.
+        if (!/^RFB [0-9]{3}\.[0-9]{3}\n$/.test(greeting.toString('latin1'))) {
           rejecting = true;
           rejectUpgrade(ws, 403);
           return cleanup();
