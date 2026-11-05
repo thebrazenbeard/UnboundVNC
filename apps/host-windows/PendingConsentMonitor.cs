@@ -6,28 +6,39 @@ internal static class PendingConsentMonitor
 {
     internal static Task<bool> ApproveWhileConnected(
         Socket socket, Func<CancellationToken, Task<bool>> approve, CancellationToken lifetime)
-        => ApproveWhileConnected(socket, approve, lifetime,
+        => DecideWhileConnected(socket, approve, false, lifetime);
+
+    internal static Task<T> DecideWhileConnected<T>(Socket socket,
+        Func<CancellationToken, Task<T>> decide, T denied, CancellationToken lifetime)
+        => DecideWhileConnected(socket, decide, denied, lifetime,
             static cancellation => Task.Delay(50, cancellation));
 
     // The injected delay lets the loopback harness hold an exact gap after a clear poll.
     internal static async Task<bool> ApproveWhileConnected(
         Socket socket, Func<CancellationToken, Task<bool>> approve, CancellationToken lifetime,
         Func<CancellationToken, Task> pauseAfterIdlePoll)
+        => await DecideWhileConnected(socket, approve, false, lifetime, pauseAfterIdlePoll)
+            .ConfigureAwait(false);
+
+    internal static async Task<T> DecideWhileConnected<T>(Socket socket,
+        Func<CancellationToken, Task<T>> decide, T denied, CancellationToken lifetime,
+        Func<CancellationToken, Task> pauseAfterIdlePoll)
     {
         using var pending = CancellationTokenSource.CreateLinkedTokenSource(lifetime);
         var peerLost = ObserveDisconnectOrEarlyData(socket, pending.Token, pauseAfterIdlePoll);
         try
         {
-            var decision = approve(pending.Token);
+            var decision = decide(pending.Token);
             if (await Task.WhenAny(decision, peerLost).ConfigureAwait(false) == peerLost)
                 pending.Cancel(); // Reject and dismiss the prompt if the peer has gone away.
 
-            bool accepted = await decision.ConfigureAwait(false);
+            T choice = await decision.ConfigureAwait(false);
             pending.Cancel(); // End monitoring before any RFB handshake begins.
-            if (!accepted || await peerLost.ConfigureAwait(false)) return false;
+            if (EqualityComparer<T>.Default.Equals(choice, denied) ||
+                await peerLost.ConfigureAwait(false)) return denied;
             // Recheck after the canceled poll gap. This is a boundary snapshot;
             // subsequent disconnects are handled by the RFB socket operations.
-            return !HasEarlyDataOrClosed(socket);
+            return HasEarlyDataOrClosed(socket) ? denied : choice;
         }
         finally
         {

@@ -1,14 +1,112 @@
 using System.Buffers.Binary;
 using UnboundVnc.Host.Windows;
 
-Check("source adapter always disabled", () =>
+Check("default and view-only never authorize effects", () =>
 {
-    Require(!NativeInputAdapter.Enabled, "native input unexpectedly enabled");
     Require(default(LocalInputConsent) == LocalInputConsent.Denied, "missing consent must deny");
-    Require(!NativeInputAdapter.TryInject(new NormalizedKey(true, LocalKeyKind.Printable, 'a'),
-        LocalInputConsent.AllowControl, true, true), "key was injected without qualification");
-    Require(!NativeInputAdapter.TryInject(new NormalizedPointer(100, 100, 1),
-        LocalInputConsent.AllowControl, true, true), "pointer was injected without qualification");
+    var gate = new ConsentEffectGate();
+    int effects = 0;
+    var epoch = gate.Snapshot;
+    Require(!gate.TryEffect(epoch, LocalInputConsent.Denied, CancellationToken.None,
+        () => true, () => { effects++; return true; }), "no-consent effect was allowed");
+    Require(!gate.TryEffect(epoch, LocalInputConsent.ViewOnly, CancellationToken.None,
+        () => true, () => { effects++; return true; }), "view-only effect was allowed");
+    Require(effects == 0, "native effect callback ran without control permission");
+});
+
+Check("explicit control permits one tested effect", () =>
+{
+    var gate = new ConsentEffectGate();
+    int effects = 0;
+    Require(gate.TryEffect(gate.Snapshot, LocalInputConsent.AllowControl, CancellationToken.None,
+        () => true, () => { effects++; return true; }), "explicit control did not reach effect");
+    Require(effects == 1, "effect called unexpected number of times");
+});
+
+Check("Stop/lock revoke and expired token deny", () =>
+{
+    var gate = new ConsentEffectGate();
+    long epoch = gate.Snapshot;
+    gate.Revoke(); // Same source method used by Stop and SessionLock.
+    Require(!gate.TryEffect(epoch, LocalInputConsent.AllowControl, CancellationToken.None,
+        () => true, () => true), "revoked epoch allowed effect");
+    using var expired = new CancellationTokenSource();
+    expired.Cancel();
+    Require(!gate.TryEffect(gate.Snapshot, LocalInputConsent.AllowControl, expired.Token,
+        () => true, () => true), "expired session allowed effect");
+});
+
+Check("secure desktop rejects before and after mock injection", () =>
+{
+    var gate = new ConsentEffectGate();
+    int effects = 0;
+    Require(!gate.TryEffect(gate.Snapshot, LocalInputConsent.AllowControl, CancellationToken.None,
+        () => false, () => { effects++; return true; }), "secure desktop effect was allowed");
+    Require(effects == 0, "mock Win32 injection was invoked on nondefault desktop");
+    bool defaultDesktop = true;
+    long epoch = gate.Snapshot;
+    Require(!gate.TryEffect(epoch, LocalInputConsent.AllowControl, CancellationToken.None,
+        () => defaultDesktop, () => { defaultDesktop = false; return true; }),
+        "desktop transition during effect was not rejected afterward");
+    Require(!gate.TryEffect(epoch, LocalInputConsent.AllowControl, CancellationToken.None,
+        () => true, () => true), "desktop transition did not revoke session");
+});
+
+Check("failed mock Win32 injection revokes control", () =>
+{
+    var gate = new ConsentEffectGate();
+    long epoch = gate.Snapshot;
+    Require(!gate.TryEffect(epoch, LocalInputConsent.AllowControl, CancellationToken.None,
+        () => true, () => false), "failed effect was treated as success");
+    Require(gate.Snapshot != epoch, "failed effect did not revoke epoch");
+    Require(!gate.TryEffect(epoch, LocalInputConsent.AllowControl, CancellationToken.None,
+        () => true, () => true), "failed effect retained control");
+});
+
+Check("revocation fences an in-flight mock effect", () =>
+{
+    var gate = new ConsentEffectGate();
+    long epoch = gate.Snapshot;
+    using var entered = new ManualResetEventSlim(false);
+    using var release = new ManualResetEventSlim(false);
+    var effect = Task.Run(() => gate.TryEffect(epoch, LocalInputConsent.AllowControl,
+        CancellationToken.None, () => true, () =>
+        {
+            entered.Set();
+            return release.Wait(TimeSpan.FromSeconds(5));
+        }));
+    try
+    {
+        Require(entered.Wait(TimeSpan.FromSeconds(5)), "mock effect did not start");
+        var revoke = Task.Run(gate.Revoke);
+        Require(SpinWait.SpinUntil(() => gate.Snapshot != epoch, TimeSpan.FromSeconds(5)),
+            "revocation did not invalidate epoch promptly");
+        release.Set();
+        Task.WaitAll(effect, revoke);
+        Require(!effect.Result, "effect was accepted after overlapping revoke");
+        Require(!gate.TryEffect(epoch, LocalInputConsent.AllowControl, CancellationToken.None,
+            () => true, () => true), "effect admitted after revoke returned");
+    }
+    finally { release.Set(); }
+});
+
+Check("native INPUT layout matches target pointer width (no API calls)", () =>
+{
+    Require(NativeInputAdapter.HasExpectedInputLayout, "SendInput INPUT interop has wrong size");
+});
+
+Check("native partial/failed pair injection is rejected with release attempt", () =>
+{
+    int releases = 0;
+    Require(NativeInputAdapter.PairCompleted(2, () => { releases++; return 1; }),
+        "two inserted events were not accepted");
+    Require(releases == 0, "successful pair invoked redundant release");
+    Require(!NativeInputAdapter.PairCompleted(1, () => { releases++; return 0; }),
+        "partial input pair was accepted");
+    Require(releases == 1, "partial input did not attempt release");
+    Require(!NativeInputAdapter.PairCompleted(0, () => { releases++; return 1; }),
+        "blocked Win32 input pair was accepted");
+    Require(releases == 1, "failed pair unexpectedly injected a release");
 });
 
 Check("ASCII key mapping and release", () =>
@@ -83,7 +181,7 @@ Check("unsupported buttons, malformed lengths and arithmetic overflow fail close
     Require(!ExperimentalInputPolicy.TryParsePointer(Pointer(0, 0, 1), 1280, 720, 0, int.MaxValue, out _), "y arithmetic overflow accepted");
 });
 
-Console.WriteLine("PASS: 8 input policy checks; no native input path enabled");
+Console.WriteLine("PASS: 15 input policy/effect-gate checks; native effects mocked only");
 
 static void Check(string label, Action action)
 {

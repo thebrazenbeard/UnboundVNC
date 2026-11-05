@@ -9,5 +9,7 @@
   <ItemGroup>
     <Compile Include="Program.cs" />
     <Compile Include="../../apps/host-windows/ExperimentalInputPolicy.cs" Link="ExperimentalInputPolicy.cs" />
+    <Compile Include="../../apps/host-windows/ConsentEffectGate.cs" Link="ConsentEffectGate.cs" />
+    <Compile Include="../../apps/host-windows/NativeInputAdapter.cs" Link="NativeInputAdapter.cs" />
   </ItemGroup>
 </Project>

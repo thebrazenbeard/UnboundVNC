@@ -9,5 +9,6 @@
   <ItemGroup>
     <Compile Include="Program.cs" />
     <Compile Include="../../apps/host-windows/PendingConsentMonitor.cs" Link="PendingConsentMonitor.cs" />
+    <Compile Include="../../apps/host-windows/ExperimentalInputPolicy.cs" Link="ExperimentalInputPolicy.cs" />
   </ItemGroup>
 </Project>
