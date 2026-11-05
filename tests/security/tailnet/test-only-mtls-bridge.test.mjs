@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer as createTcpServer } from 'node:net';
+import { createServer as createHttpServer } from 'node:http';
 import { connect as connectTls } from 'node:tls';
 import { X509Certificate, randomBytes } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
@@ -38,10 +39,10 @@ function fixtureCertificates() {
   };
 }
 
-function client({ port, certificates, peer = certificates.viewerA, origin, host }) {
+function client({ port, certificates, peer = certificates.viewerA, origin, host, allowHalfOpen = false }) {
   const socket = connectTls({
     host: '127.0.0.1', port, servername: 'bridge.test.invalid', ca: certificates.ca,
-    ...peer, rejectUnauthorized: true,
+    ...peer, rejectUnauthorized: true, allowHalfOpen,
   });
   const key = randomBytes(16).toString('base64');
   const httpHost = host ?? `bridge.test.invalid:${port}`;
@@ -72,6 +73,13 @@ function until(socket, predicate, timeoutMs = 2_500) {
     socket.once('error', onError);
     socket.once('close', onClose);
   });
+}
+
+async function waitUntil(predicate, timeoutMs = 1_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate() && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
 }
 
 test('test-owned mTLS peer + per-session approval bridges only local gateway RFB', async t => {
@@ -188,4 +196,72 @@ test('test-owned mTLS peer + per-session approval bridges only local gateway RFB
   approvalMode = 'deny';
   assert.match((await responseCode(open())).toString('latin1'), /^HTTP\/1\.1 403/);
   assert.equal(upstreamAccepts, 1);
+});
+
+test('malformed held-open internal 101 destroys upstream and frees admission slot', async t => {
+  const certificates = fixtureCertificates();
+  t.after(certificates.cleanup);
+  let upstream;
+  let upstreamEnd = false;
+  const fakeGatewaySockets = new Set();
+  const fakeGateway = createHttpServer((req, res) => {
+    if (req.method !== 'POST' || req.url !== '/api/sessions') {
+      res.writeHead(404); res.end(); return;
+    }
+    req.resume();
+    req.on('end', () => {
+      res.writeHead(201, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ wsPath: `/ws/session/${'A'.repeat(43)}` }));
+    });
+  });
+  fakeGateway.on('connection', socket => {
+    fakeGatewaySockets.add(socket);
+    socket.once('close', () => fakeGatewaySockets.delete(socket));
+  });
+  fakeGateway.on('upgrade', (req, socket) => {
+    upstream = socket;
+    socket.resume(); // Observe peer FIN/RST; Node leaves raw upgraded sockets paused.
+    socket.once('end', () => { upstreamEnd = true; });
+    // Valid-looking 101 but wrong challenge response; deliberately DO NOT
+    // terminate this TCP socket. A rejected edge must tear it down itself.
+    socket.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n' +
+      'Connection: Upgrade\r\nSec-WebSocket-Accept: WRONG\r\n\r\n');
+  });
+  await new Promise(resolve => fakeGateway.listen(0, '127.0.0.1', resolve));
+  t.after(async () => {
+    for (const socket of fakeGatewaySockets) socket.destroy();
+    await new Promise(resolve => fakeGateway.close(resolve));
+  });
+  const bridge = createTestOnlyMtlsBridge({
+    testOnlyEnabled: true,
+    tlsOptions: { ...certificates.server, ca: certificates.ca },
+    gatewayUrl: `http://127.0.0.1:${fakeGateway.address().port}`,
+    upstreamPort: 5901, allowedPeerIds: ['node:viewerA'],
+    testWhoIs: async ({ certificate }) => ({ source: 'TEST_TLS_CERT',
+      certFingerprint: certificate.fingerprint256, peerNodeId: 'node:viewerA' }),
+    testHostConsent: async request => ({ approved: true, scope: 'view-only',
+      peerNodeId: request.peerNodeId, hostId: request.hostId,
+      sessionId: request.sessionId, epoch: 1, currentEpoch: 1,
+      expiresAt: Date.now() + 5_000, signal: new AbortController().signal }),
+  });
+  const edgePort = await bridge.listen();
+  t.after(() => bridge.close());
+  const open = () => {
+    const socket = client({ port: edgePort, certificates, allowHalfOpen: true });
+    t.after(() => socket.destroy());
+    return socket;
+  };
+  const first = open();
+  assert.match((await until(first, data => data.includes('\r\n\r\n'))).toString('latin1'), /^HTTP\/1\.1 403/);
+  assert.ok(upstream, 'malformed 101 actually came from test-owned gateway TCP socket');
+  await waitUntil(() => bridge.activeSessions() === 0 &&
+    bridge.activeGatewaySockets() === 0 && upstreamEnd);
+  assert.equal(bridge.activeSessions(), 0, 'failed internal upgrade must release capacity');
+  assert.equal(bridge.activeGatewaySockets(), 0, 'bridge-owned upstream TCP handle must close');
+  assert.equal(upstreamEnd, true, 'malformed gateway peer observes bridge-side FIN');
+  // Its deliberately half-open *server-side* socket may stay writeOnly; the
+  // bridge cannot force an adversary to close the adversary-owned write half.
+  const second = open();
+  assert.match((await until(second, data => data.includes('\r\n\r\n'))).toString('latin1'), /^HTTP\/1\.1 403/,
+    'next request must attempt admission, not receive a retained 429');
 });
