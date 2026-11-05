@@ -59,6 +59,7 @@ internal static class Program
             marker.Paint += (_, e) => PaintFourColorWindow(e.Graphics, marker.ClientSize);
             marker.Show();
             marker.Activate();
+            marker.Refresh(); // Force our Paint callback before the independent screen oracle.
             Application.DoEvents();
             Thread.Sleep(350);
             // The oracle is an independently captured 32x24 desktop rectangle
@@ -68,6 +69,7 @@ internal static class Program
             {
                 try
                 {
+                    marker.Refresh(); // No WinForms message pump runs while this STA polls.
                     oracle = CaptureAndValidatePattern(bounds.Left + x - OracleWidth / 2,
                         bounds.Top + y - OracleHeight / 2);
                     return true;
