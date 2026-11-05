@@ -37,6 +37,15 @@ class StagingContract(unittest.TestCase):
     def test_no_binary_committed(self):
         self.assertFalse(any(p.suffix.lower() in {".exe", ".msi", ".dll"} for p in ROOT.rglob("*")))
 
+    def test_windows_runner_source_only_gate(self):
+        workflow = (ROOT.parents[1] / '.github/workflows/windows-attended-packaging-contract.yml').read_text(encoding='utf-8')
+        self.assertIn('runs-on: windows-latest', workflow)
+        self.assertIn('contents: read', workflow)
+        self.assertIn('persist-credentials: false', workflow)
+        self.assertIn('--self-contained true', workflow)
+        self.assertIn('-p:PublishSingleFile=true', workflow)
+        self.assertIn('Invoke-WindowsPackagingContract.ps1', workflow)
+
 
 if __name__ == "__main__":
     unittest.main()
