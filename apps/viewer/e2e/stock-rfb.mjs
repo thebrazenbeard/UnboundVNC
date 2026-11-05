@@ -306,6 +306,46 @@ async function run() {
     assert.equal(await page.locator('#session-viewonly').getAttribute('aria-pressed'), 'false',
       'a new connection should retain its documented default input behavior');
     await page.getByRole('button', { name: 'Disconnect', exact: true }).click();
+
+    // Two saved profiles use the same test-owned stock RFB endpoint, but are
+    // distinct directory entries. One session at a time; View only is not a
+    // persistent device preference and must not leak into the next profile.
+    for (const name of ['Stock Alpha', 'Stock Beta']) {
+      // At 390px the sidebar nav is hidden; the directory Add action remains.
+      await page.locator('#list-add').click();
+      await page.locator('#device-form input[name="name"]').fill(name);
+      await page.locator('#device-form input[name="host"]').fill('127.0.0.1');
+      await page.locator('#device-form input[name="port"]').fill(String(rfbPort));
+      await page.locator('#device-form button[type="submit"]').click();
+    }
+    await page.reload({ waitUntil: 'networkidle' });
+    assert.equal(await page.locator('.device-card').count(), 2,
+      'saved stock connection profiles must survive a genuine Chromium reload');
+    await page.locator('.device-card').filter({ hasText: 'Stock Alpha' })
+      .locator('[data-action="connect"]').click();
+    await page.getByText('Connected · identity unverified').waitFor({ timeout: 15_000 });
+    assert.equal(await page.locator('#session-name').textContent(), 'Stock Alpha');
+    assert.equal(await page.locator('#remote-screen canvas').count(), 1);
+    await page.getByRole('button', { name: 'View only', exact: true }).click();
+    assert.equal(await page.locator('#session-viewonly').getAttribute('aria-pressed'), 'true');
+    await page.getByRole('button', { name: 'Disconnect', exact: true }).click();
+    assert.equal(await page.locator('#session-view').isVisible(), false);
+    await page.locator('.device-card').filter({ hasText: 'Stock Beta' })
+      .locator('[data-action="connect"]').click();
+    await page.getByText('Connected · identity unverified').waitFor({ timeout: 15_000 });
+    assert.equal(await page.locator('#session-name').textContent(), 'Stock Beta');
+    assert.equal(await page.locator('#remote-screen canvas').count(), 1,
+      'switching saved profiles must create one active remote canvas, not stack sessions');
+    assert.equal(await page.locator('#session-viewonly').getAttribute('aria-pressed'), 'false',
+      'a previous saved profile View only choice must not leak into a different profile');
+    await page.waitForFunction(() => document.querySelectorAll('#toasts .toast').length === 0,
+      null, { timeout: 7_000 });
+    await page.screenshot({ path: path.join(evidenceDir, 'stock-rfb-saved-profile-sequential.png') });
+    await writeFile(path.join(evidenceDir, 'saved-profile-session-result.json'), JSON.stringify({
+      profilesSurvivedReload: 2, firstProfile: 'Stock Alpha', secondProfile: 'Stock Beta',
+      sequentialActiveCanvas: 1, viewOnlyLeakedToSecondProfile: false,
+    }, null, 2));
+    await page.getByRole('button', { name: 'Disconnect', exact: true }).click();
     succeeded = true;
     console.log(JSON.stringify({ outcome: 'PASS', browser: browser.version(), gatewayOrigin,
       rfbPort, framebuffer, desktopFit, mobileFit, mobileReconnected,
