@@ -182,8 +182,18 @@ internal static class Program
                 // our test-owned opaque window before allowing screen capture.
                 marker.Bounds = new Rectangle(bounds.Left, bounds.Top, frameWidth, frameHeight);
                 marker.Refresh();
-                Require(TestOwnedWindowCoversFrame(marker, bounds, frameWidth, frameHeight,
-                    activePattern), "FULL_FRAME_NOT_OWNED_BY_TEST_WINDOW");
+                int[] frameOwnershipMatches = new int[4];
+                bool frameOwned = TestOwnedWindowCoversFrame(marker, bounds, frameWidth,
+                    frameHeight, activePattern, frameOwnershipMatches);
+                if (!frameOwned)
+                {
+                    // Geometry and color-match counts only, never screen pixels.
+                    Point origin = marker.PointToScreen(Point.Empty);
+                    Console.WriteLine($"OWNED_FULL_FRAME_CLIENT_SIZE={marker.ClientSize.Width}x{marker.ClientSize.Height}");
+                    Console.WriteLine($"OWNED_FULL_FRAME_ORIGIN_DELTA={origin.X - bounds.Left},{origin.Y - bounds.Top}");
+                    Console.WriteLine($"OWNED_FULL_FRAME_QUADRANT_MATCH_COUNTS={string.Join(",", frameOwnershipMatches)}");
+                }
+                Require(frameOwned, "FULL_FRAME_NOT_OWNED_BY_TEST_WINDOW");
                 SendFullFrameUpdateRequest(stream, frameWidth, frameHeight);
                 Require(ReadExact(stream, 4).SequenceEqual(new byte[] { 0, 0, 0, 1 }),
                     "LARGE_UPDATE_HEADER_INVALID");
@@ -379,29 +389,31 @@ internal static class Program
     }
 
     private static bool TestOwnedWindowCoversFrame(Form marker, Rectangle screen,
-        int width, int height, Color[] pattern)
+        int width, int height, Color[] pattern, int[] matches)
     {
+        Array.Clear(matches);
         Point origin = marker.PointToScreen(Point.Empty);
         if (origin.X != screen.Left || origin.Y != screen.Top ||
             marker.ClientSize.Width < width || marker.ClientSize.Height < height) return false;
-        // Real on-screen sample at all four quadrants; abort before requesting
-        // the large frame if any region might contain non-test-owned content.
-        using var bitmap = new Bitmap(1, 1);
-        using var graphics = Graphics.FromImage(bitmap);
-        var locations = new[]
+        // A four-point check could miss an unrelated overlay between samples.
+        // Before ANY large RFB request, inspect EVERY on-screen pixel and
+        // require only the known four test-owned colors, without logging them.
+        using var bitmap = new Bitmap(width, height);
+        using (var graphics = Graphics.FromImage(bitmap))
+            graphics.CopyFromScreen(screen.Left, screen.Top, 0, 0, new Size(width, height));
+        bool owned = true;
+        for (int y = 0; y < height; y++)
+        for (int x = 0; x < width; x++)
         {
-            new Point(width / 4, height / 4), new Point(width * 3 / 4, height / 4),
-            new Point(width / 4, height * 3 / 4), new Point(width * 3 / 4, height * 3 / 4)
-        };
-        for (int i = 0; i < locations.Length; i++)
-        {
-            graphics.CopyFromScreen(screen.Left + locations[i].X,
-                screen.Top + locations[i].Y, 0, 0, new Size(1, 1));
-            Color actual = bitmap.GetPixel(0, 0);
-            if (actual.R != pattern[i].R || actual.G != pattern[i].G ||
-                actual.B != pattern[i].B) return false;
+            int quadrant = (y < marker.ClientSize.Height / 2 ? 0 : 2) +
+                (x < marker.ClientSize.Width / 2 ? 0 : 1);
+            Color actual = bitmap.GetPixel(x, y);
+            Color expected = pattern[quadrant];
+            if (actual.R == expected.R && actual.G == expected.G && actual.B == expected.B)
+                matches[quadrant]++;
+            else owned = false;
         }
-        return true;
+        return owned;
     }
 
     private static bool OnlyPriorFrameBufferThenClosed(NetworkStream stream, TcpClient client,
