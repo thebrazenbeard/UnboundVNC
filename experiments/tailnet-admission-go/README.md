@@ -1,0 +1,68 @@
+# Private tailnet admission — source candidate, not a running bridge
+
+**Status: default OFF; no production caller, no installed host consent IPC, no
+gateway handoff, no live tailnet qualification.** This isolated Go module is a
+compile-time/negative-test exploration of the **real** Tailscale SDK contract,
+not an enabled cross-machine access feature. It deliberately cannot return an
+RFB ticket or forward pixels even when the test-only principal and approval
+fakes agree. Do not redistribute or enable this as a remote desktop product.
+
+## Trust boundaries
+
+1. A future private tailnet HTTP/TLS service would need a real `tsnet.Server`
+   with `ListenTLS("tcp", ":443")`, **never** `ListenFunnel`; joining the tailnet,
+   certificate identity, grants, DNS and client policy are not tested here.
+2. For every incoming accepted socket, the local Tailscale API's
+   `LocalClient().WhoIs(request.Context(), request.RemoteAddr)` must resolve a
+   stable node ID. Headers (`Tailscale-User-Login`, `X-Forwarded-*`, Serve
+   headers), URL parameters, bearer strings and displayed login names are not
+   identity proof. Device-node identity alone does **not** authorize a session.
+3. An **attended Windows host** must provide a trusted authenticated local IPC
+   channel that asks the active user to grant **view-only** for the exact
+   initiating peer stable node, host identity, random session nonce and bounded
+   expiry. Every ticket/upgrade must be bound again; revocation must terminate
+   all affected active streams immediately, not merely block future tickets.
+   The host IPC must authenticate the caller, bind the Windows interactive
+   session, defend cross-user replay, and refuse unattended or switched-user
+   grants by default. **None of this host-side IPC exists.**
+4. Only after both checks could a *separately designed* authenticated local
+   handoff contact the current loopback gateway. Rewriting `Host`, `Origin` or
+   reusing a gateway one-use ticket is **not** an authorized IPC mechanism.
+   Current gateway's `127.0.0.1` means the gateway process's machine, not a
+   remote target Windows machine. Existing gateway target allowlist remains
+   loopback-only. This candidate has **no handoff** and returns 503 after a
+   hypothetical successful admission.
+
+## Attack-path tests and falsifiers
+
+| Attack | Current gate / remaining falsifier |
+| --- | --- |
+| Spoof `Tailscale-User-Login` or Serve/forwarding headers | SDK `WhoIs` on socket `RemoteAddr` only; fake header doesn't change principal. Live Serve compatibility **UNKNOWN**. |
+| Unknown/stale/removed peer or local API down | Default deny before host consent; real tailnet revocation timing **UNKNOWN**. |
+| Cross-user relay or stolen device key | Per-peer node allowlist and attended per-session grant required; key compromise still requires node revocation and session termination, **not proven**. |
+| Consent replay, stale epoch, scope escalation | Random nonce, host/peer/scope/epoch/TTL validation; actual trusted Windows IPC and session-bound revocation **absent**. |
+| Caller-supplied public target / arbitrary route | Fixed private `.ts.net` service name and one view-only path; there is no generic proxy or RFB target. |
+| Correct-looking grant with no trustworthy gateway seam | Still HTTP 503; no bytes forwarded, no actual remote desktop function. |
+| No host agent or no tailnet SDK identity | Constructor refuses, server listener never opened by any application. |
+
+## Reproducible source qualification
+
+`go test -mod=mod ./...` under this directory uses `tailscale.com v1.104.5`,
+whose upstream `go.mod` declares **Go 1.27.3**. The optional public GitHub
+workflow runs only on source changes using `actions/setup-go`, with no tsnet
+login, keys, secrets, exposed listeners or installs on a user machine. `go test`
+compiling the real SDK API does **not** prove the service works across machines,
+that Windows consent exists, or that TLS/WhoIs operate as intended against a
+live tailnet. The Go dependency graph, third-party notices and redistribution
+rights are not yet audited for a bundled Windows release.
+
+Primary SDK references:
+
+- [Tailscale tsnet Server reference](https://tailscale.com/docs/reference/tsnet-server-api)
+- [Go `tailscale.com/tsnet` package](https://pkg.go.dev/tailscale.com/tsnet)
+- [Go `LocalClient.WhoIs` signature](https://pkg.go.dev/tailscale.com/client/local#Client.WhoIs)
+- [Upstream tagged `v1.104.5` Go requirements](https://github.com/tailscale/tailscale/blob/v1.104.5/go.mod)
+
+The next meaningful milestone is an independently reviewed, authenticated,
+Windows interactive-user consent IPC and revocation contract, followed by
+private live tailnet negative and teardown tests with explicit user authority.
