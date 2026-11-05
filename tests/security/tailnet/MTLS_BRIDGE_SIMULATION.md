@@ -28,7 +28,11 @@ not Tailscale `WhoIs` identity** and this test makes no real tailnet connection.
    its own **local** Host/Origin upgrade; it never forwards an untrusted remote
    Host/Origin or exports the internal ticket to the peer. The binary WS/RFB
    stream is relayed on that one approved mTLS session. Concurrent admissions
-   deny, and Stop/expiry/close destroys the proxy. No public or Funnel bind.
+   deny, and Stop/expiry/close destroys the proxy. An invalid or half-open
+   internal WebSocket 101 likewise flushes a bounded denial, destroys the
+   bridge-owned upstream socket and releases the one-session slot—even if the
+   untrusted fake gateway keeps its *own* TCP write half open. No public or
+   Funnel bind.
 4. A stolen test certificate/private key or malicious trusted test callback
    can impersonate an allowed peer: no real key rotation, hardware protection,
    independent host identity, local-process authorization, network policy or
