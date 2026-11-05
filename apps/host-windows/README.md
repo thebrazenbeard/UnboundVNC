@@ -1,8 +1,8 @@
 # Windows attended host (experimental)
 
-This is a **source-only, view-only proof of concept**, not a production remote-access service. It targets .NET 8 WinForms on Windows, serves RFB 3.8 on **127.0.0.1:5901 only**, asks the logged-in local user to approve each connection before any RFB protocol or framebuffer bytes are sent, and limits each approved session to five minutes. The operator can stop sharing. Windows lock/disconnect and nondefault input desktop checks cause the connection to stop.
+This is a **source-only, view-only proof of concept**, not a production remote-access service. It targets .NET 8 WinForms on Windows, serves RFB 3.8 on **127.0.0.1:5901 only**, asks the logged-in local user to approve each connection before any RFB protocol or framebuffer bytes are sent, and limits each approved session to five minutes. The operator can stop sharing. Windows lock/disconnect and nondefault input desktop checks cause the connection to stop. A post-capture desktop/consent-epoch check attempts to prevent sending stale frames after revocation; this is not an atomic guarantee against a transition during network writes.
 
-No source here has been compiled or run on Windows in this PR. The authoring environment lacked a Windows runtime and .NET compiler. Building, protocol interoperability, capture, consent visibility, crash handling, and lock/UAC behavior are **unverified**.
+No source here has been compiled or run on Windows in this PR. The authoring environment lacked a Windows runtime and .NET compiler. Building, protocol interoperability, capture, consent visibility, crash handling, and lock/UAC behavior are **unverified**. Static source review changes do not constitute a Windows build or runtime test.
 
 ## Windows-only manual qualification
 
@@ -11,7 +11,9 @@ No source here has been compiled or run on Windows in this PR. The authoring env
 3. Use a local RFB viewer to connect to `127.0.0.1:5901` and reject the prompt. Verify no RFB data or image is received.
 4. Reconnect, approve the local consent prompt, and verify a bounded view-only desktop image. Attempt keyboard, pointer, and clipboard operations; none should affect the host.
 5. Stop sharing, lock the workstation, switch to a secure desktop, and disconnect/reconnect Windows sessions in separate tests. Confirm capture/control does not continue and no stale image is transmitted.
-6. Exercise multiple connections, abnormal disconnection, and rapid start/stop. Record failures and exact versions before declaring compatibility.
+6. Exercise multiple connections, abnormal disconnection, and rapid start/stop. Start a second host on the same port: the second should display a port error without crashing. While a nonmodal approval prompt is open, press **Stop and revoke** and ensure the prompt closes. Record failures and exact versions before declaring compatibility.
+7. Use a high-rate framebuffer requester to check that capture is limited to approximately 10 FPS, while verifying normal client request/response compatibility.
+8. In a disposable debug copy, inject an exception in the approval or capture worker (never in production). Confirm the listener is closed, the host UI reports an internal stop, and the user can start again. No automatic fault-injection test or live Windows test has run.
 
 ## Explicitly absent
 
