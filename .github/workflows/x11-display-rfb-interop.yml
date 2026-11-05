@@ -1,0 +1,35 @@
+name: Stock X11 display RFB interoperability
+
+on:
+  pull_request:
+    paths:
+      - 'tests/integration/x11-display-backends.test.mjs'
+      - '.github/workflows/x11-display-rfb-interop.yml'
+      - 'apps/gateway/src/server.mjs'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  stock-x11-scrapers:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install Ubuntu-maintained binary packages (no vendored GPL source)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends xvfb x11-xserver-utils x11-apps x11vnc tigervnc-scraping-server
+          dpkg-query -W -f='${Package} ${Version}\n' xvfb x11-xserver-utils x11-apps x11vnc tigervnc-scraping-server
+          command -v Xvfb
+          command -v xsetroot
+          command -v xwd
+          command -v x11vnc
+          command -v X0tigervnc
+      - name: Exercise two independent stock RFB scrapers over gateway loopback
+        env:
+          RFB_X11_SCRAPERS: '1'
+        run: node --test tests/integration/x11-display-backends.test.mjs
