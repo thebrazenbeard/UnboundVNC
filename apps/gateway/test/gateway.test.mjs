@@ -583,6 +583,136 @@ test('a valid Ping survives moderate queued RFB output and receives its Pong', a
   assert.equal((await connected.nextFrame()).toString(), 'session still usable');
 });
 
+test('one draining masked-Ping flood cannot monopolize eight RFB session slots', async t => {
+  const f = await fixture(t);
+  const clients = [];
+  for (let i = 0; i < 8; i++) {
+    const ticket = await (await session(f)).json();
+    const client = await upgrade(f, ticket.wsPath);
+    clients.push(client);
+    t.after(() => client.socket.destroy());
+    assert.match(client.response, /^HTTP\/1\.1 101/);
+    assert.equal((await client.nextFrame()).toString(), 'RFB 003.008\n');
+  }
+  const ninthTicket = await (await session(f)).json();
+  const denied = await upgrade(f, ninthTicket.wsPath);
+  t.after(() => denied.socket.destroy());
+  assert.match(denied.response, /^HTTP\/1\.1 429/,
+    'eight active RFB sessions must exhaust the existing bounded admission pool');
+  const attacker = clients[0].socket;
+  attacker.on('error', () => {});
+  // Unlike the slow-reader queue test, this attacker continuously receives
+  // its Pongs, so the 256KiB write backlog cap cannot be the limiting oracle.
+  let pongBytesRead = 0;
+  attacker.removeAllListeners('data');
+  attacker.on('data', chunk => { pongBytesRead += chunk.length; });
+  let attackerClosed = false;
+  attacker.once('close', () => { attackerClosed = true; });
+  const cpuBefore = process.cpuUsage();
+  let pingsSent = 0;
+  const remaining = clients.slice(1);
+  const flood = (async () => {
+    const floodStarted = Date.now();
+    while (Date.now() - floodStarted < 900 && !attacker.destroyed) {
+      const frames = [];
+      for (let i = 0; i < 512; i++) frames.push(maskedFrame(Buffer.alloc(125, 0x62), 9));
+      attacker.write(Buffer.concat(frames));
+      pingsSent += frames.length;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+  })();
+  const probeOrdinary = (async () => {
+    let maximum = 0;
+    // Probe *during*, not after, the attacker workload; ordinary RFB users
+    // must continue receiving data as one sibling session is rate-abusive.
+    for (let round = 0; round < 8; round++) {
+      await new Promise(resolve => setTimeout(resolve, 80));
+      const started = performance.now();
+      await Promise.all(remaining.map(async (client, i) => {
+        const payload = `ordinary-RFB-${round}-${i}`;
+        client.socket.write(maskedBinary(payload));
+        assert.equal((await client.nextFrame()).toString(), payload);
+      }));
+      maximum = Math.max(maximum, performance.now() - started);
+    }
+    return maximum;
+  })();
+  const [, ordinaryRfbLatencyMs] = await Promise.all([flood, probeOrdinary]);
+  const cpu = process.cpuUsage(cpuBefore);
+  console.log(JSON.stringify({ controlFlood: { pingsSent, pongBytesRead, attackerClosed,
+    cpuMicros: cpu.user + cpu.system, ordinaryRfbLatencyMs, concurrentSessions: 8 } }));
+  assert.ok(ordinaryRfbLatencyMs < 750, `ordinary RFB sessions starved for ${ordinaryRfbLatencyMs}ms`);
+  assert.equal(attackerClosed, true, 'sustained draining Ping flood escaped per-session control budget');
+  const replacementTicket = await (await session(f)).json();
+  const replacement = await upgrade(f, replacementTicket.wsPath);
+  t.after(() => replacement.socket.destroy());
+  assert.match(replacement.response, /^HTTP\/1\.1 101/);
+  assert.equal((await replacement.nextFrame()).toString(), 'RFB 003.008\n');
+});
+
+test('a routine burst of 32 masked Pings keeps its RFB session and exact Pong payloads', async t => {
+  const f = await fixture(t);
+  const ticket = await (await session(f)).json();
+  const connected = await upgrade(f, ticket.wsPath);
+  t.after(() => connected.socket.destroy());
+  assert.equal((await connected.nextFrame()).toString(), 'RFB 003.008\n');
+  const payloads = Array.from({ length: 32 }, (_, i) => Buffer.from(`normal-ping-${i}`));
+  connected.socket.write(Buffer.concat(payloads.map(payload => maskedFrame(payload, 9))));
+  for (const payload of payloads) {
+    const pong = await connected.nextPacket();
+    assert.equal(pong.opcode, 10);
+    assert.deepEqual(pong.body, payload);
+  }
+  connected.socket.write(maskedBinary('normal RFB after burst'));
+  assert.equal((await connected.nextFrame()).toString(), 'normal RFB after burst');
+});
+
+test('matching heartbeat Pong remains valid after a full routine control burst', async t => {
+  const f = await fixture(t, { heartbeatMs: 100 });
+  const ticket = await (await session(f)).json();
+  const connected = await upgrade(f, ticket.wsPath);
+  t.after(() => connected.socket.destroy());
+  assert.equal((await connected.nextFrame()).toString(), 'RFB 003.008\n');
+  const challenge = await connected.nextPacket();
+  assert.equal(challenge.opcode, 9);
+  const burst = Array.from({ length: 64 }, (_, i) => Buffer.from(`burst-${i}`));
+  // Same TCP write: consume all 64 routine Ping tokens, then answer the
+  // gateway's one outstanding heartbeat challenge without a refill window.
+  connected.socket.write(Buffer.concat([
+    ...burst.map(payload => maskedFrame(payload, 9)),
+    maskedFrame(challenge.body, 10),
+  ]));
+  for (const payload of burst) {
+    const pong = await connected.nextPacket();
+    assert.equal(pong.opcode, 10);
+    assert.deepEqual(pong.body, payload);
+  }
+  connected.socket.write(maskedBinary('heartbeat and RFB alive'));
+  let echoed = false;
+  for (let i = 0; i < 5 && !echoed; i++) {
+    const packet = await connected.nextPacket();
+    if (packet.opcode === 9) connected.socket.write(maskedFrame(packet.body, 10));
+    else if (packet.opcode === 2) echoed = packet.body.toString() === 'heartbeat and RFB alive';
+  }
+  assert.equal(echoed, true, 'legitimate heartbeat Pong was rejected after the 64-Ping burst');
+});
+
+test('unsolicited masked Pong flood cannot evade per-session control budget', async t => {
+  const f = await fixture(t);
+  const ticket = await (await session(f)).json();
+  const connected = await upgrade(f, ticket.wsPath);
+  t.after(() => connected.socket.destroy());
+  connected.socket.on('error', () => {});
+  assert.equal((await connected.nextFrame()).toString(), 'RFB 003.008\n');
+  const closed = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('unsolicited Pong flood kept session open')), 1000);
+    connected.socket.once('close', () => { clearTimeout(timer); resolve(); });
+  });
+  connected.socket.write(Buffer.concat(Array.from({ length: 96 }, (_, i) =>
+    maskedFrame(`unsolicited-${i}`, 10))));
+  await closed;
+});
+
 test('unsolicited and stale Pong frames cannot satisfy a heartbeat challenge', async t => {
   const f = await fixture(t, { heartbeatMs: 100 });
   const ticket = await (await session(f)).json();
