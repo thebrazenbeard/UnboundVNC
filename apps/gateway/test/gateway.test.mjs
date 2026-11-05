@@ -158,3 +158,16 @@ test('only standard VNC port 5900 is allowed by default', async t => {
   });
   assert.equal(standardVnc.status, 201);
 });
+
+test('rejects a non-RFB localhost service even on an explicitly allowed port', async t => {
+  const fake = createTcpServer(socket => socket.write('NOT RFB!! x\n'));
+  await new Promise(resolve => fake.listen(0, '127.0.0.1', resolve));
+  const targetPort = fake.address().port;
+  const gateway = createGateway({ port: 0, allowedPorts: [targetPort] });
+  const url = await gateway.listen();
+  t.after(async () => { await gateway.close(); await new Promise(resolve => fake.close(resolve)); });
+  const ticket = await (await session({ url, origin: url, port: targetPort })).json();
+  const attempt = await upgrade({ url, origin: url }, ticket.wsPath);
+  t.after(() => attempt.socket.destroy());
+  assert.match(attempt.response, /^HTTP\/1\.1 403/);
+});
