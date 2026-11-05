@@ -1,10 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { createCipheriv, randomBytes } from 'node:crypto';
 import { once } from 'node:events';
-import { readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rmdir, unlink, writeFile } from 'node:fs/promises';
 import { connect, createServer } from 'node:net';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { createGateway } from '../../apps/gateway/src/server.mjs';
 
 const RUN = process.env.RFB_STOCK_INTEROP === '1';
@@ -12,6 +14,7 @@ const TIMEOUT_MS = 10_000;
 const WIDTH = 48;
 const HEIGHT = 32;
 const BACKGROUND = '#28914c';
+let nextDisplay = 70 + (process.pid % 100);
 
 async function vacantPort() {
   const server = createServer();
@@ -52,13 +55,38 @@ async function assertLoopbackListener(port) {
     'RFB listener on non-loopback IPv6 interface');
 }
 
-async function startTiger(t) {
+async function waitForRfbSessionRelease(port) {
+  const deadline = Date.now() + TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    const established = await establishedRfbEndpoints(port);
+    if (established.length === 0) return;
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  throw new Error(`RFB TCP session remained ESTABLISHED after downstream disconnect: ${JSON.stringify(await establishedRfbEndpoints(port))}`);
+}
+
+async function establishedRfbEndpoints(port) {
+  const hexPort = port.toString(16).toUpperCase().padStart(4, '0');
+  const tables = await Promise.all(['/proc/net/tcp', '/proc/net/tcp6'].map(file => readFile(file, 'utf8')));
+  return tables.flatMap((table, index) => table.split('\n').slice(1).map(line => ({
+    protocol: index === 0 ? 'tcp4' : 'tcp6', fields: line.trim().split(/\s+/),
+  }))).filter(({ fields }) => fields[3] === '01' &&
+    (fields[1]?.endsWith(`:${hexPort}`) || fields[2]?.endsWith(`:${hexPort}`)))
+    .map(({ protocol, fields }) => ({ protocol,
+      local: fields[1], remote: fields[2],
+      localPort: parseInt(fields[1].split(':')[1], 16),
+      remotePort: parseInt(fields[2].split(':')[1], 16),
+    }));
+}
+
+async function startTiger(t, { securityType = 'None', passwordFile = null } = {}) {
   const port = await vacantPort();
   // Isolated Linux CI runner, ephemeral display; no real workstation, no public RFB listener.
-  const display = `:${70 + (process.pid % 120)}`;
+  const display = `:${nextDisplay++}`;
   const args = [display, '-geometry', `${WIDTH}x${HEIGHT}`, '-depth', '24',
-    '-rfbport', String(port), '-SecurityTypes', 'None', '-localhost', 'yes',
+    '-rfbport', String(port), '-SecurityTypes', securityType, '-localhost', 'yes',
     '-interface', '127.0.0.1', '-nolisten', 'tcp', '-ac'];
+  if (passwordFile) args.push('-PasswordFile', passwordFile);
   const tiger = spawn('Xtigervnc', args, { stdio: ['ignore', 'pipe', 'pipe'] });
   let serverLog = '';
   for (const stream of [tiger.stdout, tiger.stderr]) {
@@ -165,6 +193,7 @@ async function openSession(origin, path, t) {
       for (let i = 0; i < masked.length; i++) masked[i] ^= mask[i % 4];
       socket.write(Buffer.concat([prefix, mask, masked]));
     },
+    close: () => socket.write(Buffer.concat([Buffer.from([0x88, 0x80]), randomBytes(4)])),
   };
 }
 
@@ -225,6 +254,12 @@ async function rfbSession(gatewayOrigin, rfbPort, t) {
     assert.ok(w && h && x + w <= width && y + h <= height);
     const bytes = await ws.read(w * h * 4);
     assert.equal(bytes.length, w * h * 4);
+    for (let pixel = 0; pixel < bytes.length; pixel += 4) {
+      const word = init[6] ? bytes.readUInt32BE(pixel) : bytes.readUInt32LE(pixel);
+      const rgb = [init[14], init[15], init[16]].map(shift => (word >>> shift) & 255);
+      assert.ok(rgb[0] === 0x28 && rgb[1] === 0x91 && rgb[2] === 0x4c,
+        `X11 root colour mismatch at framebuffer pixel ${pixels + pixel / 4}`);
+    }
     if (x === 0 && y === 0) {
       const word = init[6] ? bytes.readUInt32BE() : bytes.readUInt32LE();
       firstPixel = [init[14], init[15], init[16]].map(shift => (word >>> shift) & 255);
@@ -233,9 +268,118 @@ async function rfbSession(gatewayOrigin, rfbPort, t) {
   }
   assert.equal(pixels, width * height, 'complete stock-server framebuffer');
   assert.deepEqual(firstPixel, [0x28, 0x91, 0x4c], 'real X11 root colour reached client through gateway');
-  console.log(`RFB stock framebuffer update rectangles=${rectangles} rawPixels=${pixels} topLeftRGB=${firstPixel}`);
+  console.log(`RFB stock framebuffer update rectangles=${rectangles} rawPixels=${pixels} uniformTestColor=true`);
   return ws;
 }
+
+async function makeTemporaryPasswordFile() {
+  // The password exists only in this test process and an owner-only ephemeral
+  // TigerVNC file. Never echo the password, challenge, response or file bytes.
+  const password = randomBytes(6).toString('base64url');
+  const dir = await mkdtemp(join(tmpdir(), 'unboundvnc-rfb-auth-'));
+  const path = join(dir, 'passwd');
+  const process = spawn('tigervncpasswd', ['-f'], { stdio: ['pipe', 'pipe', 'pipe'] });
+  let encoded = Buffer.alloc(0);
+  process.stdout.on('data', chunk => { encoded = Buffer.concat([encoded, chunk]); });
+  process.stderr.resume(); // Do not expose authentication tool diagnostics in CI logs.
+  process.stdin.end(`${password}\n`);
+  const [code] = await once(process, 'close', { signal: AbortSignal.timeout(TIMEOUT_MS) });
+  assert.equal(code, 0, 'stock tigervncpasswd -f failed');
+  assert.equal(encoded.length, 8, 'unexpected TigerVNC password-file length');
+  await writeFile(path, encoded, { mode: 0o600, flag: 'wx' });
+  return { password, path, async remove() { await unlink(path); await rmdir(dir); } };
+}
+
+function vncAuthResponse(password, challenge) {
+  assert.equal(challenge.length, 16);
+  const key = Buffer.alloc(8);
+  Buffer.from(password, 'ascii').copy(key, 0, 0, 8);
+  // RFC 6143 VNC auth reverses the bits in each DES key byte. 3DES EDE with
+  // the same key repeated three times is exactly single DES (E-D-E = E),
+  // using the Node/OpenSSL cipher available on stock Node 24 without legacy flags.
+  for (let i = 0; i < key.length; i++) {
+    let reversed = 0;
+    for (let bit = 0; bit < 8; bit++) reversed = (reversed << 1) | ((key[i] >> bit) & 1);
+    key[i] = reversed;
+  }
+  const cipher = createCipheriv('des-ede3', Buffer.concat([key, key, key]), null);
+  cipher.setAutoPadding(false);
+  return Buffer.concat([cipher.update(challenge), cipher.final()]);
+}
+
+async function beginVncAuthSession(gatewayOrigin, rfbPort, t) {
+  const issued = await fetch(`${gatewayOrigin}/api/sessions`, {
+    method: 'POST', headers: { Origin: gatewayOrigin, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ host: '127.0.0.1', port: rfbPort }),
+    signal: AbortSignal.timeout(TIMEOUT_MS),
+  });
+  assert.equal(issued.status, 201);
+  const ticket = await issued.json();
+  const ws = await openSession(gatewayOrigin, ticket.wsPath, t);
+  assert.match(await ws.headers(), /^HTTP\/1\.1 101 /);
+  const greeting = (await ws.read(12)).toString('ascii');
+  assert.equal(greeting, 'RFB 003.008\n');
+  ws.write(Buffer.from(greeting, 'ascii'));
+  const count = (await ws.read(1))[0];
+  assert.ok(count > 0 && count < 32);
+  const securityTypes = await ws.read(count);
+  assert.deepEqual(securityTypes, Buffer.from([2]), 'stock server must offer VncAuth only');
+  ws.write(Buffer.from([2]));
+  const challenge = await ws.read(16);
+  return { ws, challenge };
+}
+
+test('stock TigerVNC VncAuth accepts valid password and rejects incorrect password through gateway',
+  { skip: !RUN, timeout: 60_000 }, async t => {
+    assert.equal(process.platform, 'linux');
+    const credentials = await makeTemporaryPasswordFile();
+    t.after(() => credentials.remove());
+    const tiger = await startTiger(t, { securityType: 'VncAuth', passwordFile: credentials.path });
+    const gateway = createGateway({ port: 0, allowedPorts: [tiger.port] });
+    const origin = await gateway.listen();
+    t.after(() => gateway.close());
+
+    const approved = await beginVncAuthSession(origin, tiger.port, t);
+    approved.ws.write(vncAuthResponse(credentials.password, approved.challenge));
+    assert.equal((await approved.ws.read(4)).readUInt32BE(), 0, 'valid VncAuth response rejected');
+    approved.ws.write(Buffer.from([1]));
+    const init = await approved.ws.read(24);
+    assert.deepEqual([init.readUInt16BE(0), init.readUInt16BE(2)], [WIDTH, HEIGHT]);
+    assert.ok(init.readUInt32BE(20) < 1024);
+    await approved.ws.read(init.readUInt32BE(20));
+    approved.ws.write(Buffer.from([2, 0, 0, 1, 0, 0, 0, 0]));
+    const request = Buffer.alloc(10);
+    request[0] = 3;
+    request.writeUInt16BE(WIDTH, 6);
+    request.writeUInt16BE(HEIGHT, 8);
+    approved.ws.write(request);
+    const update = await approved.ws.read(4);
+    assert.equal(update[0], 0);
+    assert.equal(update.readUInt16BE(2), 1);
+    const rect = await approved.ws.read(12);
+    assert.deepEqual([rect.readUInt16BE(4), rect.readUInt16BE(6), rect.readInt32BE(8)], [WIDTH, HEIGHT, 0]);
+    const authenticatedPixels = await approved.ws.read(WIDTH * HEIGHT * 4);
+    for (let pixel = 0; pixel < authenticatedPixels.length; pixel += 4) {
+      const word = init[6] ? authenticatedPixels.readUInt32BE(pixel) : authenticatedPixels.readUInt32LE(pixel);
+      const rgb = [init[14], init[15], init[16]].map(shift => (word >>> shift) & 255);
+      assert.ok(rgb[0] === 0x28 && rgb[1] === 0x91 && rgb[2] === 0x4c,
+        `authenticated framebuffer failed X11 test-colour oracle at pixel ${pixel / 4}`);
+    }
+    approved.ws.close(); // Graceful RFC 6455 Close, not an abrupt network failure.
+    await waitForRfbSessionRelease(tiger.port);
+
+    const rejected = await beginVncAuthSession(origin, tiger.port, t);
+    const wrongPassword = (credentials.password[0] === 'A' ? 'B' : 'A') + credentials.password.slice(1);
+    rejected.ws.write(vncAuthResponse(wrongPassword, rejected.challenge));
+    const status = (await rejected.ws.read(4)).readUInt32BE();
+    assert.equal(status, 1, 'incorrect VncAuth password was accepted');
+    const reasonLength = (await rejected.ws.read(4)).readUInt32BE();
+    assert.ok(reasonLength > 0 && reasonLength <= 1024, 'bounded RFB 3.8 authentication failure reason');
+    assert.ok((await rejected.ws.read(reasonLength)).length > 0);
+    rejected.ws.close();
+    await waitForRfbSessionRelease(tiger.port);
+    console.log('RFB stock VncAuth: correct challenge-response authorized framebuffer; wrong response returned SecurityResult=1');
+  });
 
 test('stock TigerVNC → actual loopback gateway: RFB framebuffer and disconnect/reconnect', { skip: !RUN, timeout: 45_000 }, async t => {
   assert.equal(process.platform, 'linux', 'stock TigerVNC runner requires Linux');
@@ -244,10 +388,34 @@ test('stock TigerVNC → actual loopback gateway: RFB framebuffer and disconnect
   const origin = await gateway.listen();
   t.after(() => gateway.close());
   const first = await rfbSession(origin, tiger.port, t);
-  first.socket.destroy();
-  await once(first.socket, 'close', { signal: AbortSignal.timeout(TIMEOUT_MS) });
+  const firstClosed = once(first.socket, 'close', { signal: AbortSignal.timeout(TIMEOUT_MS) });
+  first.close();
+  await firstClosed;
+  await waitForRfbSessionRelease(tiger.port);
   const second = await rfbSession(origin, tiger.port, t);
-  second.socket.destroy();
-  await once(second.socket, 'close', { signal: AbortSignal.timeout(TIMEOUT_MS) });
-  console.log('RFB stock lifecycle: first session closed; second independent ticket and framebuffer passed; second session closed');
+  const secondClosed = once(second.socket, 'close', { signal: AbortSignal.timeout(TIMEOUT_MS) });
+  second.close();
+  await secondClosed;
+  await waitForRfbSessionRelease(tiger.port);
+  console.log('RFB stock lifecycle: both downstream sockets closed, upstream TCP sessions released, second fresh-ticket framebuffer passed');
 });
+
+test('diagnostic: abrupt downstream TCP close releases stock RFB upstream connection',
+  { skip: !RUN, timeout: 30_000 }, async t => {
+    const tiger = await startTiger(t);
+    const baseline = await establishedRfbEndpoints(tiger.port);
+    console.log(`RFB abrupt diagnostic readiness-probe baseline=${JSON.stringify(baseline)}`);
+    assert.deepEqual(baseline, [], 'readiness probe itself left an ESTABLISHED RFB session');
+    const gateway = createGateway({ port: 0, allowedPorts: [tiger.port] });
+    const origin = await gateway.listen();
+    t.after(() => gateway.close());
+    const session = await rfbSession(origin, tiger.port, t);
+    const active = await establishedRfbEndpoints(tiger.port);
+    console.log(`RFB abrupt diagnostic before client destruction=${JSON.stringify(active)}`);
+    assert.ok(active.length >= 2, 'expected both client-side and server-side established loopback TCP endpoints');
+    const closed = once(session.socket, 'close', { signal: AbortSignal.timeout(TIMEOUT_MS) });
+    session.socket.destroy();
+    await closed;
+    await waitForRfbSessionRelease(tiger.port);
+    console.log('RFB abrupt diagnostic upstream TCP connection released without TigerVNC shutdown');
+  });
