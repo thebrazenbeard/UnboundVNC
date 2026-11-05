@@ -1,6 +1,6 @@
 import { createServer as createHttpsServer } from 'node:https';
 import { connect as connectTcp } from 'node:net';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, createHash } from 'node:crypto';
 
 // EXPERIMENTAL TEST FIXTURE, NOT a product listener or a Tailscale adapter.
 // A real tsnet adapter would use Server.ListenTLS and trusted
@@ -92,6 +92,7 @@ export function createTestOnlyMtlsBridge({
       active = false;
     };
     socket.once('close', stop);
+    socket.once('error', stop);
     const deadline = AbortSignal.timeout(DEADLINE_MS);
     try {
       const certificate = socket.getPeerCertificate();
@@ -153,7 +154,13 @@ export function createTestOnlyMtlsBridge({
           if (response.length > 8192) return reject(new Error('oversize gateway response'));
           if (end < 0) return;
           upstream.off('data', onData);
-          if (!response.subarray(0, end).toString('latin1').startsWith('HTTP/1.1 101 Switching Protocols\r\n')) {
+          const lines = response.subarray(0, end).toString('latin1').split('\r\n');
+          const expectedAccept = createHash('sha1').update(
+            `${req.headers['sec-websocket-key']}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`,
+          ).digest('base64');
+          const accepts = lines.filter(line => /^sec-websocket-accept:/i.test(line));
+          if (lines[0] !== 'HTTP/1.1 101 Switching Protocols' ||
+              accepts.length !== 1 || accepts[0].split(':').slice(1).join(':').trim() !== expectedAccept) {
             return reject(new Error('gateway denied internal WS'));
           }
           resolve();
