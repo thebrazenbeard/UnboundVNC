@@ -70,3 +70,24 @@ test('malformed legacy alias fails closed even when canonical pin itself is vali
   assert.throws(() => readServerPin(store, '127.0.0.1:5900'), /invalid/);
   assert.throws(() => rememberServerPin(store, '127.0.0.1:5900', A), /invalid/);
 });
+
+test('public read/remember/forget APIs normalize uppercase loopback caller inputs', () => {
+  const store = fakeStorage(JSON.stringify({ '127.0.0.1:5900': A }));
+  assert.equal(readServerPin(store, 'LOCALHOST:5900'), A);
+  assert.throws(() => rememberServerPin(store, 'LOCALHOST:5900', B), /identity changed/);
+  assert.equal(readServerPin(store, 'LOCALHOST:5900'), A);
+  forgetServerPin(store, 'LOCALHOST:5900');
+  assert.equal(readServerPin(store, '127.0.0.1:5900'), null);
+});
+
+test('present-but-null pin is corruption, never missing/first-use trust', () => {
+  for (const entry of [
+    { '127.0.0.1:5900': null },
+    { 'localhost:5900': null },
+    { '127.0.0.1:5900': A, 'localhost:5900': null },
+  ]) {
+    const store = fakeStorage(JSON.stringify(entry));
+    assert.throws(() => readServerPin(store, 'LOCALHOST:5900'), /invalid/);
+    assert.throws(() => rememberServerPin(store, '127.0.0.1:5900', A), /invalid/);
+  }
+});
