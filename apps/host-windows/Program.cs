@@ -25,6 +25,7 @@ internal sealed class HostWindow : Form
     private TcpListener? listener;
     private CancellationTokenSource? lifetime;
     private TcpClient? activeClient;
+    private Task? acceptWorker;
     private long consentEpoch;
 
     public HostWindow()
@@ -56,7 +57,8 @@ internal sealed class HostWindow : Form
         state.Text = "Loopback 127.0.0.1:5901 only. Each connection requires your approval.";
         // Never capture screen pixels on the WinForms synchronization context.
         var token = lifetime.Token;
-        _ = Task.Run(() => AcceptLoop(server, token));
+        // Retain the worker task; AcceptLoop catches unexpected failures and always tears down.
+        acceptWorker = Task.Run(() => AcceptLoop(server, token));
     }
 
     private void Stop()
@@ -85,6 +87,7 @@ internal sealed class HostWindow : Form
 
     private async Task AcceptLoop(TcpListener server, CancellationToken cancellation)
     {
+        bool failed = false;
         try
         {
             while (!cancellation.IsCancellationRequested)
@@ -107,10 +110,32 @@ internal sealed class HostWindow : Form
                 {
                     // Deliberately no frame, credential, clipboard or desktop data is logged.
                 }
-                finally { activeClient = null; }
+                finally { if (ReferenceEquals(activeClient, client)) activeClient = null; }
             }
         }
         catch (Exception ex) when (ex is OperationCanceledException or ObjectDisposedException or SocketException) { }
+        catch (Exception)
+        {
+            // Unexpected worker failure: no screen, clipboard or credential data is logged.
+            failed = true;
+        }
+        finally
+        {
+            server.Stop();
+            // Conditional cleanup must not revoke a newer listener started after Stop().
+            try
+            {
+                if (IsHandleCreated && !IsDisposed)
+                    BeginInvoke((Action)(() =>
+                    {
+                        if (!ReferenceEquals(listener, server)) return;
+                        Stop();
+                        if (failed && !IsDisposed)
+                            state.Text = "Local preview stopped after an internal error. Restart to retry.";
+                    }));
+            }
+            catch (Exception ex) when (ex is InvalidOperationException or ObjectDisposedException) { }
+        }
     }
 
     private async Task<bool> ApproveConnection(CancellationToken token)
