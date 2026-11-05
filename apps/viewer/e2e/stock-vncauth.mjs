@@ -227,6 +227,32 @@ async function run() {
       wrongPassword: 'rejected before connected session',
       storageContainsPassword: false, pixel: framebuffer, browser: browser.version(),
     }, null, 2));
+
+    // Real same-origin document navigation fires pagehide. Verify the OLD
+    // document discarded an unsubmitted credential before Chromium leaves it
+    // (which may otherwise retain a DOM snapshot in the back/forward cache).
+    // Only a Boolean-like marker crosses documents via window.name; never the
+    // password, its length, a filled-input screenshot, or a Playwright trace.
+    await quickConnect();
+    await page.locator('#credentials-form input[name="password"]').fill(credentials.password);
+    await page.evaluate(() => {
+      window.name = 'wave10-pagehide-unobserved';
+      window.addEventListener('pagehide', () => {
+        const hasSecret = Boolean(document.querySelector('#credentials-form input[name="password"]')?.value);
+        window.name = hasSecret ? 'wave10-pagehide-retained' : 'wave10-pagehide-erased';
+      }, { once: true });
+    });
+    await page.goto('http://127.0.0.1:5173/?wave10-pagehide=1', { waitUntil: 'domcontentloaded' });
+    const pagehideResult = await page.evaluate(() => {
+      const result = window.name;
+      window.name = '';
+      return result;
+    });
+    assert.equal(pagehideResult, 'wave10-pagehide-erased',
+      'real pagehide navigation must clear an unsubmitted VNC password in the old document');
+    await writeFile(path.join(evidenceDir, 'credential-pagehide-result.json'),
+      JSON.stringify({ navigation: 'actual same-origin document load',
+        oldDocumentCredentialCleared: true }, null, 2));
     console.log(JSON.stringify({ outcome: 'PASS', browser: browser.version(),
       correctPassword: 'authenticated framebuffer', wrongPassword: 'rejected pre-session',
       framebuffer, evidenceDir }));
