@@ -42,7 +42,7 @@ func whois(node string) *apitype.WhoIsResponse {
 }
 
 func validFixture() (*candidate, *fakeWhoIs, *fakeHostIPC) {
-	identity := &fakeWhoIs{response: whois("node:viewerA")}
+	identity := &fakeWhoIs{response: whois("n5SUKe8CNTRL")}
 	host := &fakeHostIPC{}
 	host.approveFunc = func(req ConsentRequest) (Grant, error) {
 		return Grant{PeerNodeID: req.PeerNodeID, HostNodeID: req.HostNodeID,
@@ -50,7 +50,7 @@ func validFixture() (*candidate, *fakeWhoIs, *fakeHostIPC) {
 			ExpiresAt: time.Unix(2_000, 0), Revoked: make(chan struct{})}, nil
 	}
 	a, err := newCandidate(Config{Enabled: true, ServiceDNS: "host.test-tailnet.ts.net",
-		HostNodeID: "node:hostA", AllowedPeer: []string{"node:viewerA"}}, identity, host)
+		HostNodeID: "nPbn3DgCaT11CNTRL", AllowedPeer: []string{"n5SUKe8CNTRL"}}, identity, host)
 	if err != nil {
 		panic(err)
 	}
@@ -79,7 +79,7 @@ func TestNoProductionEnableOrListenerWithoutTrustedWindowsIPC(t *testing.T) {
 		t.Fatalf("default-off expected, got %v", err)
 	}
 	cfg := Config{Enabled: true, ServiceDNS: "host.test-tailnet.ts.net",
-		HostNodeID: "node:hostA", AllowedPeer: []string{"node:viewerA"}}
+		HostNodeID: "nPbn3DgCaT11CNTRL", AllowedPeer: []string{"n5SUKe8CNTRL"}}
 	if _, err := newCandidate(cfg, &fakeWhoIs{}, nil); !errors.Is(err, ErrNoHostIPC) {
 		t.Fatalf("no host IPC must deny before listener, got %v", err)
 	}
@@ -95,11 +95,11 @@ func TestNoProductionEnableOrListenerWithoutTrustedWindowsIPC(t *testing.T) {
 func TestNoWildcardPublicOrArbitraryRouteConfig(t *testing.T) {
 	a, identity, host := validFixture()
 	for _, cfg := range []Config{
-		{Enabled: true, ServiceDNS: "https://evil.example", HostNodeID: a.cfg.HostNodeID, AllowedPeer: []string{"node:viewerA"}},
-		{Enabled: true, ServiceDNS: "0.0.0.0", HostNodeID: a.cfg.HostNodeID, AllowedPeer: []string{"node:viewerA"}},
-		{Enabled: true, ServiceDNS: a.cfg.ServiceDNS, HostNodeID: "*", AllowedPeer: []string{"node:viewerA"}},
+		{Enabled: true, ServiceDNS: "https://evil.example", HostNodeID: a.cfg.HostNodeID, AllowedPeer: []string{"n5SUKe8CNTRL"}},
+		{Enabled: true, ServiceDNS: "0.0.0.0", HostNodeID: a.cfg.HostNodeID, AllowedPeer: []string{"n5SUKe8CNTRL"}},
+		{Enabled: true, ServiceDNS: a.cfg.ServiceDNS, HostNodeID: "*", AllowedPeer: []string{"n5SUKe8CNTRL"}},
 		{Enabled: true, ServiceDNS: a.cfg.ServiceDNS, HostNodeID: a.cfg.HostNodeID, AllowedPeer: []string{"*"}},
-		{Enabled: true, ServiceDNS: a.cfg.ServiceDNS, HostNodeID: a.cfg.HostNodeID, AllowedPeer: []string{"node:viewerA", "node:viewerA"}},
+		{Enabled: true, ServiceDNS: a.cfg.ServiceDNS, HostNodeID: a.cfg.HostNodeID, AllowedPeer: []string{"n5SUKe8CNTRL", "n5SUKe8CNTRL"}},
 	} {
 		if _, err := newCandidate(cfg, identity, host); !errors.Is(err, ErrBadConfig) {
 			t.Errorf("bad route accepted %#v: %v", cfg, err)
@@ -126,7 +126,7 @@ func TestTrustedSocketWhoIsAndHostConsentStillCannotForward(t *testing.T) {
 }
 
 func TestMissingWrongOrUnavailableWhoIsDeniesBeforeConsent(t *testing.T) {
-	for _, response := range []*apitype.WhoIsResponse{nil, {}, whois("node:attacker")} {
+	for _, response := range []*apitype.WhoIsResponse{nil, {}, whois("nAttackerCNTRL")} {
 		a, identity, host := validFixture()
 		identity.response = response
 		if status := execute(a, request()); status != http.StatusForbidden {
@@ -143,8 +143,8 @@ func TestMissingWrongOrUnavailableWhoIsDeniesBeforeConsent(t *testing.T) {
 
 func TestHostConsentStaleMismatchedRevokedAndAbsentDenies(t *testing.T) {
 	for _, mutate := range []func(ConsentRequest, Grant) Grant{
-		func(_ ConsentRequest, g Grant) Grant { g.PeerNodeID = "node:attacker"; return g },
-		func(_ ConsentRequest, g Grant) Grant { g.HostNodeID = "node:other"; return g },
+		func(_ ConsentRequest, g Grant) Grant { g.PeerNodeID = "nAttackerCNTRL"; return g },
+		func(_ ConsentRequest, g Grant) Grant { g.HostNodeID = "nOtherCNTRL"; return g },
 		func(_ ConsentRequest, g Grant) Grant { g.SessionID = "replay"; return g },
 		func(_ ConsentRequest, g Grant) Grant { g.Scope = "control"; return g },
 		func(_ ConsentRequest, g Grant) Grant { g.CurrentEpoch++; return g },
