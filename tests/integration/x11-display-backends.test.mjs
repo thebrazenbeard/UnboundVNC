@@ -167,10 +167,12 @@ async function startBackend(t, backend) {
   // Repaint with a transparent pointer after the scraper subscribes to the
   // display. Without this, XWD excludes the central cursor while scrapers
   // paint it directly into RFB Raw pixels, falsifying the full-frame oracle.
-  const repaint = spawnSync('xsetroot', ['-display', display, '-solid', '#28914c',
-    '-cursor', cursor, cursor],
+  const repaint = spawnSync('xsetroot', ['-display', display, '-solid', '#28914c'],
     { encoding: 'utf8', timeout: 3000 });
-  assert.equal(repaint.status, 0, 'Xvfb repaint failed');
+  assert.equal(repaint.status, 0, `Xvfb repaint failed: ${repaint.stderr}`);
+  const hidePointer = spawnSync('xsetroot', ['-display', display, '-cursor', cursor, cursor],
+    { encoding: 'utf8', timeout: 3000 });
+  assert.equal(hidePointer.status, 0, `Xvfb cursor hiding failed: ${hidePointer.stderr}`);
   await delay(1200);
   assertX11RootPixels(display);
   return port;
