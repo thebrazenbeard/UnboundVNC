@@ -41,10 +41,9 @@ jobs:
           $out = Join-Path $env:RUNNER_TEMP 'unboundvnc-viewer-desktop-check'
           & './packaging/viewer-windows/node_modules/.bin/electron-packager.cmd' packaging/viewer-windows UnboundVNCViewer --platform=win32 --arch=x64 --out=$out --asar
           if ($LASTEXITCODE -ne 0) { throw 'Unsigned app folder build failed.' }
-      - name: Detect live-owner recovery race before implementing mutex guard
+      - name: Verify live Apply/Recover/Remove contention and abandoned-owner recovery
         shell: pwsh
-        run: ./packaging/viewer-windows/installer-preview/Invoke-HostedConcurrencyAcceptance.ps1 -Mode Baseline
+        run: ./packaging/viewer-windows/installer-preview/Invoke-HostedConcurrencyAcceptance.ps1 -Mode Verify
 
-      # Baseline is intentionally expected to turn red on a reproduced defect;
-      # it will be switched to Verify alongside the narrowly scoped fix.
+      # Prior baseline on PR55 head 18c11e7 proved live-owner deletion (red).
       # No installer, profile, framebuffer or binary artifact upload.

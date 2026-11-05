@@ -7,7 +7,8 @@ param(
   [switch]$InjectCopyFailure,
   [switch]$InjectRemovalFailure,
   [switch]$CrashPauseAfterCopy,
-  [switch]$CrashPauseAfterMove
+  [switch]$CrashPauseAfterMove,
+  [switch]$PauseWithMutex
 )
 
 Set-StrictMode -Version Latest
@@ -171,6 +172,26 @@ if (($CrashPauseAfterCopy -or $CrashPauseAfterMove) -and $Operation -ne 'ApplyTe
   throw 'Crash checkpoints belong only to ApplyTest.'
 }
 if ($CrashPauseAfterCopy -and $CrashPauseAfterMove) { throw 'Select only one crash checkpoint.' }
+if ($PauseWithMutex -and $Operation -ne 'RemoveTest') { throw 'Mutex hold fixture belongs only to RemoveTest.' }
+
+# A named Windows kernel mutex is keyed by the validated test-owned GUID, not
+# by a file inside the folder that another operation could delete. The OS
+# releases ownership when a process is killed, so journal recovery can resume.
+$mutex = [Threading.Mutex]::new($false, "Local\UnboundVNC-Preview-$id")
+$mutexOwned = $false
+try {
+  try { $mutexOwned = $mutex.WaitOne(0) }
+  catch [Threading.AbandonedMutexException] {
+    $mutexOwned = $true
+    Write-Host 'ABANDONED TEST MUTEX: prior owner terminated; strict journal/receipt validation still required.'
+  }
+  if (-not $mutexOwned) { throw 'Concurrent preview transaction refused: same test-owned root has a live operation.' }
+  if ($PauseWithMutex) {
+    $ready = Join-Path $runner "unboundvnc-viewer-mutex-ready-$id.txt"
+    if (Test-Path -LiteralPath $ready) { throw 'Refusing pre-existing mutex fixture marker.' }
+    Set-Content -LiteralPath $ready -Value $id -NoNewline
+    Wait-ForTestCrash 'mutex-owned-removal'
+  }
 
 switch ($Operation) {
   'PreviewInstall' {
@@ -302,4 +323,8 @@ switch ($Operation) {
       } else { throw $failure }
     }
   }
+}
+} finally {
+  if ($mutexOwned) { $mutex.ReleaseMutex() }
+  $mutex.Dispose()
 }
