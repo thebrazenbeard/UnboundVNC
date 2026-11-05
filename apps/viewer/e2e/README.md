@@ -48,6 +48,26 @@ The fixture requests `SecurityTypes=None` solely for its explicit IPv4
 authenticated, consented or authorized network access to a workstation.
 Neither the RFB listener nor the gateway is published or deployed.
 
+## Stock VncAuth browser qualification (disposable password)
+
+The separate `Stock TigerVNC VncAuth Chromium (loopback)` job runs
+`node e2e/stock-vncauth.mjs`: a throwaway eight-character password is generated
+inside the ephemeral CI runner and passed privately to `tigervncpasswd -f`.
+The resulting owner-only TigerVNC password file is used by loopback-only stock
+`Xtigervnc` and removed after testing. Chromium uses the viewer's real
+`Credentials required` modal for a correct-password framebuffer and a wrong-
+password rejection before any remote session can establish. It also asserts
+browser storage contains no password.
+
+The artifact contains **only credential-free** screenshots taken before the
+password is typed or after the authentication form is cleared, plus a result
+summary and browser console events. **Playwright tracing is intentionally
+disabled** for this test because traces may retain user-entered passwords.
+No plaintext password, encoded password file, challenge, response or secret
+environment variable is uploaded, committed or logged. This is still only
+loopback VncAuth interoperability: VncAuth does not encrypt the transport or
+establish server identity/host consent.
+
 Passing this script establishes **UI interaction and rendering only**. It
 does not prove noVNC framebuffer display, authentication, secure connectivity,
 Windows host support, or RealVNC feature parity.
