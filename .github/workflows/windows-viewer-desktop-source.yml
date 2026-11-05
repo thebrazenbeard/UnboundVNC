@@ -86,6 +86,10 @@ jobs:
             if (Test-Path -LiteralPath $errorReceipt) {
               Write-Host "CI-only desktop smoke error: $(Get-Content -LiteralPath $errorReceipt -Raw)"
             }
+            $fixtureEvents = Join-Path $env:RUNNER_TEMP 'unboundvnc-viewer-fixture-protocol.txt'
+            if (Test-Path -LiteralPath $fixtureEvents) {
+              Write-Host "CI-only synthetic RFB protocol events: $(Get-Content -LiteralPath $fixtureEvents -Raw)"
+            }
             if ($process.ExitCode -ne 0) { throw "Desktop app exited $($process.ExitCode)." }
             if (-not (Test-Path -LiteralPath $receipt -PathType Leaf)) { throw 'No renderer/gateway smoke receipt.' }
             $result = Get-Content -LiteralPath $receipt -Raw | ConvertFrom-Json

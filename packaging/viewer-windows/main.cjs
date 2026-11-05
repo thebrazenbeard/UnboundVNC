@@ -93,7 +93,9 @@ if (!app.requestSingleInstanceLock()) {
           const view = await window.webContents.executeJavaScript(`(() => ({
             status: document.querySelector('#session-status')?.textContent ?? '',
             canvas: Boolean(document.querySelector('#remote-screen canvas')),
-            error: document.querySelector('#connection-error-message')?.textContent ?? ''
+            error: document.querySelector('#connection-error-message')?.textContent ?? '',
+            sessionHidden: document.querySelector('#session-view')?.hidden,
+            toast: document.querySelector('#toasts')?.lastElementChild?.textContent ?? ''
           }))()`);
           lastView = view;
           if (view.error) throw new Error(`Synthetic loopback viewer connection failed: ${view.error}`);
