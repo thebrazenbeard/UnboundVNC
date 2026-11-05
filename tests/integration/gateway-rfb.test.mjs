@@ -14,7 +14,7 @@ const TIMEOUT_MS = 3000;
 async function openWs(address, path) {
   const endpoint = new URL(address);
   const socket = connect({ host: '127.0.0.1', port: Number(endpoint.port) });
-  await once(socket, 'connect');
+  await once(socket, 'connect', { signal: AbortSignal.timeout(TIMEOUT_MS) });
   const client = {
     socket,
     buffer: Buffer.alloc(0),
@@ -151,7 +151,7 @@ test('RFB bytes traverse local gateway to a synthetic RFB server', async t => {
   assert.equal(update.readInt32BE(12), 0);
   assert.deepEqual(await client.read(16), fixtureProtocol.PIXELS);
 
-  const keyEvent = once(rfb.events, 'message');
+  const keyEvent = once(rfb.events, 'message', { signal: AbortSignal.timeout(TIMEOUT_MS) });
   const key = Buffer.alloc(8);
   key[0] = 4;
   key[1] = 1;
@@ -162,7 +162,7 @@ test('RFB bytes traverse local gateway to a synthetic RFB server', async t => {
   assert.equal(keyConnection, connection);
   assert.deepEqual(keyMessage, { type: 'key', down: true, key: 0x61 });
 
-  const pointerEvent = once(rfb.events, 'message');
+  const pointerEvent = once(rfb.events, 'message', { signal: AbortSignal.timeout(TIMEOUT_MS) });
   client.write(Buffer.from([5, 1, 0, 1, 0, 1]));
   const [pointerConnection, pointerMessage] = await pointerEvent;
   assert.equal(pointerConnection, connection);
