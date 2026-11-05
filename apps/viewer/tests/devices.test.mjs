@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { describeEndpoint, loadDevices, saveDevices, sortedDevices, validateDevice } from '../src/devices.mjs';
+import { assertGatewayLocalTarget, describeEndpoint, loadDevices, saveDevices, sortedDevices, validateDevice } from '../src/devices.mjs';
 
 function memoryStorage(initial = new Map()) {
   const entries = new Map(initial);
@@ -17,6 +17,18 @@ test('validates a normal RFB connection profile', () => {
   assert.deepEqual(validateDevice({ name: 'Home', host: '[::1]' }), {
     name: 'Home', host: '[::1]', port: 5900,
   });
+});
+
+test('connection routing accepts only the gateway machine, not another device or IPv6 loopback', () => {
+  for (const host of ['127.0.0.1', 'localhost']) {
+    assert.doesNotThrow(() => assertGatewayLocalTarget(host), host);
+  }
+  for (const host of ['192.168.1.23', '10.0.0.8', 'example.com', 'lappy.local', '[::1]', 'LOCALHOST']) {
+    assert.throws(() => assertGatewayLocalTarget(host), /computer running the gateway/i, host);
+  }
+  // Saved profile parsing must stay backward compatible: do not silently
+  // discard remote profiles merely because this preview cannot dial them yet.
+  assert.equal(validateDevice({ name: 'Future remote', host: 'lappy.local', port: 5900 }).host, 'lappy.local');
 });
 
 test('rejects URL schemes, paths, empty names, and invalid ports', () => {
