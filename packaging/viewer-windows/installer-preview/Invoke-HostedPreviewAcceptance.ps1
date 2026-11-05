@@ -18,9 +18,16 @@ $profile = Join-Path $root 'unboundvnc-viewer-ci-empty-profile'
 $fixture = $null
 $viewer = $null
 
-function Must-Refuse([scriptblock]$block, [string]$reason) {
+function Must-Refuse([scriptblock]$block, [string]$reason, [string]$expectedError = '') {
   $refused = $false
-  try { & $block } catch { $refused = $true; Write-Host "EXPECTED REFUSAL ($reason): $($_.Exception.Message)" }
+  try { & $block } catch {
+    $actualError = $_.Exception.Message
+    if ($expectedError -and $actualError -cne $expectedError) {
+      throw "NEGATIVE ORACLE FAILURE ($reason): expected '$expectedError'; observed '$actualError'."
+    }
+    $refused = $true
+    Write-Host "EXPECTED REFUSAL ($reason): $actualError"
+  }
   if (-not $refused) { throw "Unsafe preview operation was accepted: $reason" }
 }
 
@@ -111,18 +118,18 @@ try {
 
   $unknown = Join-Path $app 'unlisted-user-file.txt'
   Set-Content -LiteralPath $unknown -Value 'test-only unknown file' -NoNewline
-  Must-Refuse { & $transaction -Operation RemoveTest -SandboxRoot $root } 'unknown installed file must be preserved'
+  Must-Refuse { & $transaction -Operation RemoveTest -SandboxRoot $root } 'unknown installed file must be preserved' 'Unknown, missing, modified or additional application file/directory.'
   if (-not (Test-Path -LiteralPath $unknown)) { throw 'Unknown-file guard changed user file.' }
   Remove-Item -LiteralPath $unknown
 
   Set-Content -LiteralPath $marker -Value 'wrong-test-owner' -NoNewline
-  try { Must-Refuse { & $transaction -Operation RemoveTest -SandboxRoot $root } 'altered ownership marker' }
+  try { Must-Refuse { & $transaction -Operation RemoveTest -SandboxRoot $root } 'altered ownership marker' 'Preview ownership marker absent or mismatched.' }
   finally { Set-Content -LiteralPath $marker -Value $id -NoNewline }
 
   $lockedFile = Join-Path $app 'resources/app.asar'
   $held = [IO.File]::Open($lockedFile, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
   try {
-    Must-Refuse { & $transaction -Operation RemoveTest -SandboxRoot $root } 'locked app.asar file handle'
+    Must-Refuse { & $transaction -Operation RemoveTest -SandboxRoot $root } 'locked app.asar file handle' "Locked or inaccessible installed file: $lockedFile"
   } finally { $held.Dispose() }
 
   $junctionTarget = Join-Path $root 'owned-junction-target'
@@ -130,7 +137,7 @@ try {
   $null = New-Item -ItemType Directory -Path $junctionTarget
   try {
     $null = New-Item -ItemType Junction -Path $junctionPath -Target $junctionTarget
-    Must-Refuse { & $transaction -Operation RemoveTest -SandboxRoot $root } 'nested junction under installed app'
+    Must-Refuse { & $transaction -Operation RemoveTest -SandboxRoot $root } 'nested junction under installed app' "Reparse descendant rejected: $junctionPath"
     Write-Host 'PREVIEW REPARSE GUARD PASS: test-owned nested junction refused.'
   } finally {
     if (Test-Path -LiteralPath $junctionPath) { Remove-Item -LiteralPath $junctionPath -Force }
