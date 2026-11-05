@@ -199,6 +199,35 @@ async function run() {
       filteredRenameRemovedCard: true, focusReturnedToSearch: true,
       lastDeviceRemoved: true, focusMovedToEmptyAdd: true, emptyDirectorySurvivedReload: true,
     }, null, 2));
+
+    // At mobile width Quick Connect lives well below the persistent error
+    // banner. Test the *viewport* after a failed attempt, not a fullPage
+    // stitched screenshot that hides an offscreen-feedback defect.
+    await page.locator('#quick-host').fill('127.0.0.1');
+    await page.locator('#quick-form button[type="submit"]').click();
+    await page.locator('#connection-error').waitFor({ state: 'visible', timeout: 12_000 });
+    const quickFailure = await page.evaluate(() => {
+      const error = document.getElementById('connection-error').getBoundingClientRect();
+      const retry = document.getElementById('connection-retry').getBoundingClientRect();
+      const submit = document.querySelector('#quick-form button[type="submit"]').getBoundingClientRect();
+      const inside = rect => rect.top >= 0 && rect.bottom <= window.innerHeight;
+      return {
+        viewportHeight: window.innerHeight, scrollY: window.scrollY,
+        errorTop: error.top, errorBottom: error.bottom, retryTop: retry.top,
+        submitTop: submit.top, errorInViewport: inside(error),
+        retryInViewport: inside(retry), focusedControl: document.activeElement?.id ?? '',
+      };
+    });
+    await writeFile(path.join(screenshotDir, 'quick-failure-viewport-result.json'),
+      JSON.stringify(quickFailure, null, 2));
+    await page.screenshot({ path: path.join(screenshotDir, 'quick-failure-viewport.png'),
+      animations: 'disabled' });
+    assert.equal(quickFailure.errorInViewport, true,
+      'failed mobile Quick Connect must show its error without requiring the user to scroll to the top');
+    assert.equal(quickFailure.retryInViewport, true,
+      'failed mobile Quick Connect must visibly offer the actionable Retry button');
+    assert.equal(quickFailure.focusedControl, 'connection-retry',
+      'keyboard focus after a failed connection should move to Retry');
     assert.equal(browserEvents.filter(event => event.type === 'pageerror').length, 0,
       'viewer has no uncaught browser exceptions');
     succeeded = true;
