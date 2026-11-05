@@ -34,3 +34,11 @@ test('Fit screen retains an accessible name when responsive toolbar text is hidd
   assert.match(css, /\.session-action span\s*\{\s*display:\s*none/);
   assert.match(js, /id="session-scale"[^>]*aria-label="Fit screen"/);
 });
+
+test('other mobile session controls retain stable names without changing view-only state', () => {
+  const js = readFileSync(new URL('../src/main.js', import.meta.url), 'utf8');
+  assert.match(js, /id="session-viewonly"[^>]*aria-label="View only"[^>]*aria-pressed="false"/);
+  assert.match(js, /id="session-fullscreen"[^>]*title="Fullscreen"/);
+  assert.match(js, /id="session-disconnect"[^>]*aria-label="Disconnect"/);
+  assert.match(js, /rfb\.viewOnly = !rfb\.viewOnly/);
+});
