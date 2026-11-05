@@ -246,6 +246,10 @@ switch ($Operation) {
     $hasPending = Test-Path -LiteralPath $pending -PathType Container
     $hasApp = Test-Path -LiteralPath $appFolder -PathType Container
     if ($hasPending -eq $hasApp) { throw 'Recovery requires exactly one pending or moved payload.' }
+    if (($entry.phase -eq 'pending-verified' -and -not $hasPending) -or
+        ($entry.phase -eq 'app-moved' -and -not $hasApp)) {
+      throw 'Recovery journal phase/payload location mismatch; preserving ambiguous state.'
+    }
     $payload = if ($hasPending) { $pending } else { $appFolder }
     Assert-InventoryEqual $entry.inventory (Get-Inventory $payload)
     Assert-RecoveryLayout $payload

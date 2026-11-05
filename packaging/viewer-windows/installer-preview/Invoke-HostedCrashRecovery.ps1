@@ -63,6 +63,17 @@ foreach ($checkpoint in @('AfterCopy','AfterMove')) {
     if (-not $process.WaitForExit(5000)) { throw 'Owned crash-child process did not terminate.' }
     Write-Host "CRASH INJECTION PASS: force-terminated exact owned PowerShell PID $($process.Id) after journal phase $phase."
 
+    # A forged or torn phase must never authorize deletion even if the payload
+    # hashes are correct; phase determines the only admissible physical slot.
+    $savedJournal = Get-Content -LiteralPath $journal -Raw
+    try {
+      $changed = $savedJournal | ConvertFrom-Json
+      $changed.phase = if ($phase -eq 'pending-verified') { 'app-moved' } else { 'pending-verified' }
+      Set-Content -LiteralPath $journal -Value (ConvertTo-Json -InputObject $changed -Depth 12) -NoNewline
+      Must-Refuse { & $transaction -Operation RecoverTest -SandboxRoot $root } 'forged swapped journal phase'
+      if (-not (Test-Path -LiteralPath $payload)) { throw 'Phase mismatch deleted a valid payload.' }
+    } finally { Set-Content -LiteralPath $journal -Value $savedJournal -NoNewline }
+
     $unknown = Join-Path $payload 'unrecognized-crash-file.txt'
     Set-Content -LiteralPath $unknown -Value 'not in inventory' -NoNewline
     Must-Refuse { & $transaction -Operation RecoverTest -SandboxRoot $root } 'unknown staged file'
@@ -115,4 +126,4 @@ foreach ($checkpoint in @('AfterCopy','AfterMove')) {
     }
   }
 }
-Write-Host "HOSTED CRASH JOURNAL PASS: both abrupt-copy and abrupt-rename checkpoints recovered; unknown, forged marker, junction, extra directory and committed receipt refused; all $($sourceBefore.Count) source files retained SHA256."
+Write-Host "HOSTED CRASH JOURNAL PASS: both abrupt-copy and abrupt-rename checkpoints recovered; swapped journal phases, unknown files, forged marker, junction, extra directory and committed receipt refused; all $($sourceBefore.Count) source files retained SHA256."
