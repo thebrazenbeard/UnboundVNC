@@ -2,6 +2,7 @@ import RFB from '@novnc/novnc';
 import { describeEndpoint, loadDevices, saveDevices, sortedDevices, validateDevice } from './devices.mjs';
 import { fingerprintServerKey } from './identity.mjs';
 import { compareServerPin, forgetServerPin, readServerPin, rememberServerPin, requirePinnedIdentity, trustedEndpoint } from './trust.mjs';
+import { captureFocus, findDeviceAction, isToolbarEscape, restoreFocus } from './focus.mjs';
 import './style.css';
 
 const app = document.querySelector('#app');
@@ -11,6 +12,8 @@ const state = {
   editId: null,
   connection: null,
   gateway: 'checking',
+  sessionReturnFocus: null,
+  lastFailure: null,
 };
 
 const glyph = {
@@ -69,6 +72,10 @@ app.innerHTML = `
     </aside>
     <main class="workspace" id="devices">
       <header class="topbar"><div class="eyebrow"><span class="live-spark"></span> CONTROL CENTER <span class="slash">/</span> DEVICE FLEET</div><span class="top-pill">LOCAL FIRST <span>◈</span> NO SUBSCRIPTION</span></header>
+      <section id="connection-error" class="connection-error" role="alert" aria-labelledby="connection-error-title" hidden>
+        <div><strong id="connection-error-title">Connection unsuccessful</strong><p id="connection-error-message"></p></div>
+        <div class="connection-error-actions"><button id="connection-retry" class="btn btn-quiet" type="button">Retry connection</button><button id="connection-error-dismiss" class="btn btn-quiet" type="button">Dismiss</button></div>
+      </section>
       <section class="hero"><div><p class="eyebrow hero-eyebrow">ACCESS WITHOUT ASKING PERMISSION FROM A PLATFORM</p><h1>Your machines.<br/><em>Your rules.</em></h1><p class="hero-copy">Every desktop you own, one clean place to reach it. Standard VNC underneath. Freedom on top.</p>
         <div class="hero-actions"><button id="hero-add" class="btn btn-primary" type="button">${glyph.plus} Add device</button><a href="#quick-connect" class="btn btn-quiet">Quick connect ${glyph.arrow}</a></div></div>
         <div class="hero-art" aria-hidden="true"><div class="orbit orbit-one"></div><div class="orbit orbit-two"></div><div class="orbit orbit-three"></div><div class="core-device">${glyph.monitor}</div><span class="node node-a"></span><span class="node node-b"></span><span class="node node-c"></span></div>
@@ -87,7 +94,7 @@ app.innerHTML = `
       <span id="session-status" class="session-status" role="status" aria-live="polite">Connecting…</span>
       <div class="session-actions"><button id="session-viewonly" class="session-action" type="button" aria-pressed="false" title="Disable local keyboard and mouse input">${glyph.eye}<span>View only</span></button><button id="session-scale" class="session-action active" type="button" aria-pressed="true" title="Fit remote display to window">${glyph.expand}<span>Fit screen</span></button><button id="session-fullscreen" class="session-action" type="button" title="Fullscreen">${glyph.maximize}<span>Fullscreen</span></button><button id="session-disconnect" class="session-action disconnect" type="button">${glyph.close}<span>Disconnect</span></button></div>
     </div><div id="session-stage" class="session-stage"><div id="remote-screen" aria-label="Remote desktop framebuffer"></div></div>
-    <div class="session-footnote">Session traffic stays between this local gateway and the selected VNC endpoint. View-only mode is a viewer control, not host-side authorization.</div>
+    <div class="session-footnote">Ctrl+Alt+Shift+Escape returns keyboard focus from the remote canvas to session controls. View-only is a viewer control, not host-side authorization. Gateway-to-host traffic may not be encrypted.</div>
   </section>
   <dialog id="device-dialog" class="modal"><form id="device-form" method="dialog"><div class="modal-header"><div><p class="section-kicker">DEVICE PROFILE</p><h2 id="device-modal-title">Add a device</h2></div><button class="modal-x" type="button" data-close="device-dialog" aria-label="Close">${glyph.close}</button></div>
     <label>Device name <input name="name" maxlength="64" required placeholder="e.g. Lappy"/></label>
@@ -149,12 +156,32 @@ function closeDialog(id) {
   if (dialog.open) dialog.close();
 }
 
+function renderConnectionError() {
+  const panel = document.getElementById('connection-error');
+  document.getElementById('connection-error-message').textContent = state.lastFailure?.message ?? '';
+  panel.hidden = !state.lastFailure;
+}
+
+function showConnectionFailure(device, message) {
+  state.lastFailure = { device, message };
+  renderConnectionError();
+}
+
+function clearConnectionFailure() {
+  state.lastFailure = null;
+  renderConnectionError();
+}
+
 function showSession(device) {
+  state.sessionReturnFocus = captureFocus(document.activeElement);
+  clearConnectionFailure();
   document.querySelector('#session-name').textContent = device.name;
   document.querySelector('#session-address').textContent = describeEndpoint(device);
   document.querySelector('#session-status').textContent = 'Connecting…';
   document.querySelector('#session-view').hidden = false;
+  document.querySelector('.application').inert = true;
   document.body.classList.add('session-active');
+  document.querySelector('#session-disconnect').focus({ preventScroll: true });
   document.querySelector('#session-viewonly').classList.remove('active');
   document.querySelector('#session-viewonly').setAttribute('aria-pressed', 'false');
   document.querySelector('#session-scale').classList.add('active');
@@ -162,7 +189,10 @@ function showSession(device) {
 }
 
 function hideSession() {
-  document.querySelector('#session-view').hidden = true;
+  const view = document.querySelector('#session-view');
+  const wasActive = !view.hidden;
+  view.hidden = true;
+  document.querySelector('.application').inert = false;
   document.body.classList.remove('session-active');
   document.querySelector('#remote-screen').replaceChildren();
   closeDialog('credentials-dialog');
@@ -171,6 +201,10 @@ function hideSession() {
   document.querySelector('#identity-approve').hidden = false;
   document.querySelector('#identity-reset').hidden = true;
   document.querySelector('#identity-fingerprint').textContent = 'Calculating…';
+  if (wasActive) {
+    restoreFocus(state.sessionReturnFocus, document.querySelector('#devices-grid'), document.querySelector('#quick-host'));
+  }
+  state.sessionReturnFocus = null;
 }
 
 function disconnect() {
@@ -222,11 +256,13 @@ async function connectTo(device) {
         requirePinnedIdentity(readServerPin(window.localStorage, trustedEndpoint(target)), connection.verifiedFingerprint);
       } catch (error) {
         disconnect();
+        showConnectionFailure(device, error.message);
         notify(error.message, 'error');
         return;
       }
       document.querySelector('#session-status').textContent = connection.verifiedFingerprint
         ? 'Connected · RSA key verified' : 'Connected · identity unverified';
+      rfb.focus({ preventScroll: true });
       if (device.id) {
         const stored = state.devices.find(d => d.id === device.id);
         if (stored) { stored.lastConnectedAt = Date.now(); persist(); renderDevices(); }
@@ -239,6 +275,7 @@ async function connectTo(device) {
         requirePinnedIdentity(readServerPin(window.localStorage, trustedEndpoint(target)), connection.verifiedFingerprint);
       } catch (error) {
         disconnect();
+        showConnectionFailure(device, error.message);
         notify(error.message, 'error');
         return;
       }
@@ -280,23 +317,29 @@ async function connectTo(device) {
       } catch (error) {
         if (state.connection !== connection || connection.verificationAttempt !== attempt) return;
         disconnect();
+        showConnectionFailure(device, `Could not verify server identity: ${error.message}`);
         notify(`Could not verify server identity: ${error.message}`, 'error');
       }
     });
     rfb.addEventListener('securityfailure', event => {
       if (state.connection !== connection) return;
-      notify(`VNC authentication failed${event.detail?.reason ? ': ' + event.detail.reason : '.'}`, 'error');
+      connection.failureMessage = `VNC authentication failed${event.detail?.reason ? ': ' + event.detail.reason : '.'}`;
+      notify(connection.failureMessage, 'error');
     });
     rfb.addEventListener('disconnect', event => {
       if (state.connection !== connection) return;
       state.connection = null;
       hideSession();
+      if (connection.failureMessage || !event.detail?.clean) {
+        showConnectionFailure(device, connection.failureMessage || 'Remote connection ended unexpectedly.');
+      }
       notify(event.detail?.clean ? 'Session disconnected.' : 'Remote connection ended unexpectedly.', event.detail?.clean ? 'info' : 'error');
     });
   } catch (error) {
     if (state.connection !== connection) return;
     state.connection = null;
     hideSession();
+    showConnectionFailure(device, error?.message || 'Connection failed.');
     notify(error?.message || 'Connection failed.', 'error');
   }
 }
@@ -315,7 +358,14 @@ document.getElementById('devices-grid').addEventListener('click', event => {
   const device = state.devices.find(d => d.id === button.dataset.id);
   if (!device) return;
   switch (button.dataset.action) {
-    case 'favorite': device.favorite = !device.favorite; persist(); renderDevices(); break;
+    case 'favorite': {
+      const retainFocus = document.activeElement === button;
+      device.favorite = !device.favorite;
+      persist(); renderDevices();
+      if (retainFocus) findDeviceAction(document.querySelector('#devices-grid'), 'favorite', device.id)
+        ?.focus({ preventScroll: true });
+      break;
+    }
     case 'edit': openDeviceDialog(device); break;
     case 'delete':
       if (!window.confirm(`Remove ${device.name} from your saved devices? This does not change the remote computer.`)) return;
@@ -352,6 +402,18 @@ document.getElementById('quick-form').addEventListener('submit', event => {
   const data = Object.fromEntries(new FormData(event.currentTarget));
   connectTo({ ...data, name: data.host });
 });
+document.getElementById('connection-retry').addEventListener('click', () => {
+  if (state.lastFailure) connectTo(state.lastFailure.device);
+});
+document.getElementById('connection-error-dismiss').addEventListener('click', clearConnectionFailure);
+document.addEventListener('keydown', event => {
+  if (!state.connection || !isToolbarEscape(event)
+      || document.querySelector('#credentials-dialog').open
+      || document.querySelector('#identity-dialog').open) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  document.getElementById('session-disconnect').focus({ preventScroll: true });
+}, true);
 document.getElementById('session-disconnect').addEventListener('click', () => { disconnect(); notify('Disconnected.'); });
 document.getElementById('session-viewonly').addEventListener('click', event => {
   const rfb = state.connection?.rfb;
@@ -402,6 +464,7 @@ document.getElementById('identity-approve').addEventListener('click', () => {
     // A storage failure may be a concurrent change to an existing pin. Do not
     // allow a successful user click to bypass an unresolved mismatch.
     disconnect();
+    showConnectionFailure(connection.device, `Cannot establish remembered server identity: ${error.message}`);
     notify(`Cannot establish remembered server identity: ${error.message}`, 'error');
     return;
   }
