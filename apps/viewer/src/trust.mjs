@@ -19,6 +19,15 @@ export function compareServerPin(pinned, observed) {
   return pinned === observed ? 'matching' : 'changed';
 }
 
+// A previously pinned RA2 endpoint must not silently downgrade to VncAuth,
+// None, or any security mode that omits the pinned server-key challenge.
+export function requirePinnedIdentity(pinned, verified) {
+  if (pinned === null) return;
+  if (!validFingerprint(pinned) || pinned !== verified) {
+    throw new Error('This endpoint has a remembered RSA key, but the server did not prove that identity. Possible downgrade or changed key.');
+  }
+}
+
 export function readServerPin(storage, endpoint) {
   const raw = storage.getItem(TRUST_STORAGE_KEY);
   if (raw === null) return null;
