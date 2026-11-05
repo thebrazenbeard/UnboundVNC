@@ -14,6 +14,10 @@ const MAX_CONTROL_OUTBOUND = 256 * 1024;
 // Pongs can otherwise evade the write-queue ceiling while monopolizing CPU.
 const CONTROL_BURST = 64;
 const CONTROL_REFILL_PER_SECOND = 32;
+// Tiny or empty binary/continuation frames bypass payload and Pong limits.
+// Permit high-rate legitimate RFB input, but cap per-frame parse work.
+const DATA_FRAME_BURST = 4096;
+const DATA_FRAME_REFILL_PER_SECOND = 1024;
 const TICKET_MS = 30_000;
 const HEARTBEAT_MS = 30_000;
 const MAX_SOCKETS = 8;
@@ -196,6 +200,8 @@ export function createGateway({ port = 6081, host = '127.0.0.1', allowedPorts = 
     let fragment = false;
     let controlTokens = CONTROL_BURST;
     let lastControlAt = performance.now();
+    let dataFrameTokens = DATA_FRAME_BURST;
+    let lastDataFrameAt = performance.now();
     let heartbeatTimer;
     let expectedPong = null;
     let closeTimer;
@@ -365,6 +371,12 @@ export function createGateway({ port = 6081, host = '127.0.0.1', allowedPorts = 
           continue;
         }
         if (opcode === 0 && !fragment || opcode === 2 && fragment) return cleanup();
+        const now = performance.now();
+        dataFrameTokens = Math.min(DATA_FRAME_BURST, dataFrameTokens +
+          Math.max(0, now - lastDataFrameAt) * DATA_FRAME_REFILL_PER_SECOND / 1000);
+        lastDataFrameAt = now;
+        if (dataFrameTokens < 1) return cleanup();
+        dataFrameTokens -= 1;
         fragment = !fin;
         if (!rfb.write(payload)) ws.pause();
       }

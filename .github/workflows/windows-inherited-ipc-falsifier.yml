@@ -1,0 +1,23 @@
+name: Windows inherited handle IPC falsifier (default OFF)
+
+on:
+  pull_request:
+    paths:
+      - 'experiments/windows-inherited-ipc/**'
+      - '.github/workflows/windows-inherited-ipc-falsifier.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inherited-handle-adversary:
+    runs-on: windows-2025
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Compile and run test-owned inherited-handle adversaries
+        run: dotnet run --project experiments/windows-inherited-ipc/WindowsInheritedIpcFalsifier.csproj --configuration Release
