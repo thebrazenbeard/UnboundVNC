@@ -94,7 +94,9 @@ async function run() {
     await page.screenshot({ path: desktopImage, fullPage: true });
 
     await page.locator('.device-card [data-action="connect"]').click();
-    await page.getByText('Gateway intentionally disabled for UI smoke test').waitFor();
+    await page.locator('#connection-error-message').waitFor();
+    assert.equal(await page.locator('#connection-error-message').textContent(),
+      'Gateway intentionally disabled for UI smoke test');
     assert.equal(await page.locator('#session-view').isVisible(), false);
 
     await page.setViewportSize({ width: 390, height: 844 });
