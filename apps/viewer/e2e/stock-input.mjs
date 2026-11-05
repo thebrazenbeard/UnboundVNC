@@ -215,12 +215,23 @@ async function run() {
       'clipboard toolbar control needs an accessible name even at mobile widths');
     const browserText = `local-${randomUUID()}`;
     const remoteText = `remote-${randomUUID()}`;
+    const unsolicitedText = `unsolicited-${randomUUID()}`;
     await page.locator('#session-viewonly').click();
     assert.equal(await clipboardOpen.isDisabled(), true,
       'viewer view-only must block clipboard exchange');
     await page.locator('#session-viewonly').click();
+    setDisposableClipboard(display, unsolicitedText);
+    await until(() => clipboardMatches(display, unsolicitedText), 3000);
     await clipboardOpen.click();
     await page.getByRole('dialog', { name: 'Text clipboard' }).waitFor();
+    await new Promise(resolve => setTimeout(resolve, 300));
+    assert.equal(await page.locator('#session-clipboard-copy').isDisabled(), true,
+      'unsolicited remote clipboard events must not be captured before opt-in');
+    await page.locator('#session-clipboard-text').fill('é'.repeat(40_000));
+    await page.locator('#session-clipboard-send').click();
+    await page.getByText('Text exceeds the 64 KiB UTF-8 limit.').waitFor();
+    assert.equal(clipboardMatches(display, unsolicitedText), true,
+      'oversized multibyte text must not alter the remote clipboard');
     await page.locator('#session-clipboard-text').fill(browserText);
     await page.locator('#session-clipboard-send').click();
     await until(() => clipboardMatches(display, browserText), 7000);
@@ -228,6 +239,10 @@ async function run() {
       'sent clipboard text must not remain in the viewer textarea');
     await page.locator('#session-clipboard-close').click();
 
+    await clipboardOpen.click();
+    await page.locator('#session-clipboard-receive').click();
+    assert.equal(await page.locator('#session-clipboard-dialog').isVisible(), false,
+      'one-time receive must return focus/control to the remote desktop session');
     setDisposableClipboard(display, remoteText);
     await clipboardOpen.click();
     await until(async () => !await page.locator('#session-clipboard-copy').isDisabled(), 7000);
@@ -239,8 +254,8 @@ async function run() {
     assert.equal(actualMatches, true,
       'stock Xtigervnc clipboard event must reach actual browser clipboard');
     await page.locator('#session-clipboard-close').click();
-    assert.equal(JSON.stringify(browserEvents).includes(browserText) ||
-      JSON.stringify(browserEvents).includes(remoteText), false,
+    assert.equal([browserText, remoteText, unsolicitedText].some(value =>
+      JSON.stringify(browserEvents).includes(value)), false,
     'browser event evidence must never contain clipboard values');
     await page.setViewportSize({ width: 390, height: 844 });
     await clipboardOpen.click();
