@@ -109,7 +109,7 @@ internal sealed class HostWindow : Form
                 {
                     var offeredEpoch = Volatile.Read(ref consentEpoch);
                     if (!await PendingConsentMonitor.ApproveWhileConnected(
-                            client.GetStream(), ApproveConnection, cancellation).ConfigureAwait(false) ||
+                            client.Client, ApproveConnection, cancellation).ConfigureAwait(false) ||
                         Volatile.Read(ref consentEpoch) != offeredEpoch) continue;
                     var authorizedEpoch = offeredEpoch;
                     using var session = CancellationTokenSource.CreateLinkedTokenSource(cancellation);

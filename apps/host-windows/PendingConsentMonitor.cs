@@ -1,12 +1,14 @@
+using System.Net.Sockets;
+
 namespace UnboundVnc.Host.Windows;
 
 internal static class PendingConsentMonitor
 {
     internal static async Task<bool> ApproveWhileConnected(
-        Stream stream, Func<CancellationToken, Task<bool>> approve, CancellationToken lifetime)
+        Socket socket, Func<CancellationToken, Task<bool>> approve, CancellationToken lifetime)
     {
         using var pending = CancellationTokenSource.CreateLinkedTokenSource(lifetime);
-        var peerLost = ObserveDisconnectOrEarlyData(stream, pending.Token);
+        var peerLost = ObserveDisconnectOrEarlyData(socket, pending.Token);
         try
         {
             var decision = approve(pending.Token);
@@ -14,31 +16,35 @@ internal static class PendingConsentMonitor
                 pending.Cancel(); // Reject and dismiss the prompt if the peer has gone away.
 
             bool accepted = await decision.ConfigureAwait(false);
-            pending.Cancel(); // End the read before any RFB handshake begins.
+            pending.Cancel(); // End monitoring before any RFB handshake begins.
             return accepted && !await peerLost.ConfigureAwait(false);
         }
         finally
         {
             pending.Cancel();
-            await peerLost.ConfigureAwait(false); // No read may overlap the RFB session.
+            await peerLost.ConfigureAwait(false); // No monitor may overlap the RFB session.
         }
     }
 
-    private static async Task<bool> ObserveDisconnectOrEarlyData(Stream stream, CancellationToken cancellation)
+    private static async Task<bool> ObserveDisconnectOrEarlyData(Socket socket, CancellationToken cancellation)
     {
-        var oneByte = new byte[1];
         try
         {
-            // The server emits the first RFB protocol bytes only after local approval.
-            // Until then a read can detect EOF, or reject unsolicited client bytes.
-            _ = await stream.ReadAsync(oneByte, cancellation).ConfigureAwait(false);
-            return true;
+            // SelectRead signals early data, FIN or connection failure. Never read the
+            // socket here: canceling a pending NetworkStream.ReadAsync can disconnect
+            // an otherwise valid TCP peer on Windows.
+            while (!cancellation.IsCancellationRequested)
+            {
+                if (socket.Poll(0, SelectMode.SelectRead)) return true;
+                await Task.Delay(50, cancellation).ConfigureAwait(false);
+            }
+            return false;
         }
         catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
         {
             return false;
         }
-        catch (Exception ex) when (ex is IOException or ObjectDisposedException or System.Net.Sockets.SocketException)
+        catch (Exception ex) when (ex is ObjectDisposedException or SocketException)
         {
             return true; // Broken pending connection is never an authorized connection.
         }

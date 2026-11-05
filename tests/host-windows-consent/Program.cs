@@ -8,7 +8,7 @@ await Check("peer closes before consent", async () =>
     using var peer = pair.peer;
     using var host = pair.host;
     var canceled = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-    var result = PendingConsentMonitor.ApproveWhileConnected(host.GetStream(),
+    var result = PendingConsentMonitor.ApproveWhileConnected(host.Client,
         token => AwaitApprovalOrCancel(token, canceled), CancellationToken.None);
     peer.Close();
     Require(!await result.WaitAsync(TimeSpan.FromSeconds(5)), "closed peer was approved");
@@ -21,7 +21,7 @@ await Check("unsolicited pre-approval data", async () =>
     using var peer = pair.peer;
     using var host = pair.host;
     var canceled = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-    var result = PendingConsentMonitor.ApproveWhileConnected(host.GetStream(),
+    var result = PendingConsentMonitor.ApproveWhileConnected(host.Client,
         token => AwaitApprovalOrCancel(token, canceled), CancellationToken.None);
     await peer.GetStream().WriteAsync(new byte[] { 0x42 });
     Require(!await result.WaitAsync(TimeSpan.FromSeconds(5)), "pre-approval bytes were accepted");
@@ -34,7 +34,7 @@ await Check("approval keeps subsequent RFB bytes intact", async () =>
     using var peer = pair.peer;
     using var host = pair.host;
     var approval = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-    var result = PendingConsentMonitor.ApproveWhileConnected(host.GetStream(),
+    var result = PendingConsentMonitor.ApproveWhileConnected(host.Client,
         _ => approval.Task, CancellationToken.None);
     approval.SetResult(true);
     Require(await result.WaitAsync(TimeSpan.FromSeconds(5)), "connected peer was rejected");
@@ -52,7 +52,7 @@ await Check("host revokes pending consent", async () =>
     using var host = pair.host;
     using var lifetime = new CancellationTokenSource();
     var canceled = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-    var result = PendingConsentMonitor.ApproveWhileConnected(host.GetStream(),
+    var result = PendingConsentMonitor.ApproveWhileConnected(host.Client,
         token => AwaitApprovalOrCancel(token, canceled), lifetime.Token);
     lifetime.Cancel();
     Require(!await result.WaitAsync(TimeSpan.FromSeconds(5)), "host revocation was ignored");
