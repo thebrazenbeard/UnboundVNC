@@ -92,7 +92,6 @@ internal sealed class HostWindow : Form
             if (IsHandleCreated && !IsDisposed) BeginInvoke((Action)Stop);
         }
         catch (InvalidOperationException) { } // Window handle is closing.
-        catch (ObjectDisposedException) { } // Window was disposed during dispatch.
     }
 
     private async Task AcceptLoop(TcpListener server, CancellationToken cancellation)
