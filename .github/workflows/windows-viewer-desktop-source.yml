@@ -36,6 +36,14 @@ jobs:
         shell: pwsh
         run: npm ci --prefix packaging/viewer-windows --no-audit --no-fund
 
+      - name: Verify pinned dependency-license metadata and negative review gates
+        shell: pwsh
+        run: |
+          node --test packaging/viewer-windows/tests/license-inventory.test.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'Dependency-license metadata tests failed.' }
+          node packaging/viewer-windows/scripts/license-inventory.mjs --check
+          if ($LASTEXITCODE -ne 0) { throw 'Dependency-license metadata gate failed.' }
+
       - name: Real local gateway HTTP/WS boundary tests
         shell: pwsh
         run: node --test packaging/viewer-windows/tests/local-server.test.mjs
