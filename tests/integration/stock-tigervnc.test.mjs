@@ -183,6 +183,7 @@ async function openSession(origin, path, t) {
       for (let i = 0; i < masked.length; i++) masked[i] ^= mask[i % 4];
       socket.write(Buffer.concat([prefix, mask, masked]));
     },
+    close: () => socket.write(Buffer.concat([Buffer.from([0x88, 0x80]), randomBytes(4)])),
   };
 }
 
@@ -348,7 +349,7 @@ test('stock TigerVNC VncAuth accepts valid password and rejects incorrect passwo
     const rect = await approved.ws.read(12);
     assert.deepEqual([rect.readUInt16BE(4), rect.readUInt16BE(6), rect.readInt32BE(8)], [WIDTH, HEIGHT, 0]);
     assert.equal((await approved.ws.read(WIDTH * HEIGHT * 4)).length, WIDTH * HEIGHT * 4);
-    approved.ws.socket.destroy();
+    approved.ws.close(); // Graceful RFC 6455 Close, not an abrupt network failure.
     await waitForRfbSessionRelease(tiger.port);
 
     const rejected = await beginVncAuthSession(origin, tiger.port, t);
@@ -359,7 +360,7 @@ test('stock TigerVNC VncAuth accepts valid password and rejects incorrect passwo
     const reasonLength = (await rejected.ws.read(4)).readUInt32BE();
     assert.ok(reasonLength > 0 && reasonLength <= 1024, 'bounded RFB 3.8 authentication failure reason');
     assert.ok((await rejected.ws.read(reasonLength)).length > 0);
-    rejected.ws.socket.destroy();
+    rejected.ws.close();
     await waitForRfbSessionRelease(tiger.port);
     console.log('RFB stock VncAuth: correct challenge-response authorized framebuffer; wrong response returned SecurityResult=1');
   });
@@ -372,12 +373,12 @@ test('stock TigerVNC → actual loopback gateway: RFB framebuffer and disconnect
   t.after(() => gateway.close());
   const first = await rfbSession(origin, tiger.port, t);
   const firstClosed = once(first.socket, 'close', { signal: AbortSignal.timeout(TIMEOUT_MS) });
-  first.socket.destroy();
+  first.close();
   await firstClosed;
   await waitForRfbSessionRelease(tiger.port);
   const second = await rfbSession(origin, tiger.port, t);
   const secondClosed = once(second.socket, 'close', { signal: AbortSignal.timeout(TIMEOUT_MS) });
-  second.socket.destroy();
+  second.close();
   await secondClosed;
   await waitForRfbSessionRelease(tiger.port);
   console.log('RFB stock lifecycle: both downstream sockets closed, upstream TCP sessions released, second fresh-ticket framebuffer passed');
