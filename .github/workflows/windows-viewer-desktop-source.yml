@@ -1,0 +1,60 @@
+name: Windows desktop viewer packaged-folder prototype
+
+on:
+  pull_request:
+    paths:
+      - 'packaging/viewer-windows/**'
+      - '.github/workflows/windows-viewer-desktop-source.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  windows-desktop-source:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out exact source without persisted credentials
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Node 24 for Vite and packaging
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Install pinned viewer dependencies
+        shell: pwsh
+        run: npm ci --prefix apps/viewer --no-audit --no-fund
+
+      - name: Build production browser renderer
+        shell: pwsh
+        run: npm run build --prefix apps/viewer
+
+      - name: Install pinned desktop packager dependencies
+        shell: pwsh
+        run: npm ci --prefix packaging/viewer-windows --no-audit --no-fund
+
+      - name: Real local gateway HTTP/WS boundary tests
+        shell: pwsh
+        run: node --test packaging/viewer-windows/tests/local-server.test.mjs
+
+      - name: Prepare immutable viewer assets and gateway source
+        shell: pwsh
+        run: node packaging/viewer-windows/scripts/prepare.mjs
+
+      - name: Build unsigned unpacked Windows app folder, never install or publish
+        shell: pwsh
+        run: |
+          $output = Join-Path $env:RUNNER_TEMP 'unboundvnc-viewer-desktop-check'
+          & './packaging/viewer-windows/node_modules/.bin/electron-packager.cmd' packaging/viewer-windows UnboundVNCViewer --platform=win32 --arch=x64 --out=$output --overwrite --asar
+          if ($LASTEXITCODE -ne 0) { throw 'Electron folder packaging failed.' }
+          $app = Join-Path $output 'UnboundVNCViewer-win32-x64'
+          $exe = Join-Path $app 'UnboundVNCViewer.exe'
+          $asar = Join-Path $app 'resources/app.asar'
+          if (-not (Test-Path -LiteralPath $exe -PathType Leaf) -or -not (Test-Path -LiteralPath $asar -PathType Leaf)) {
+            throw 'Unpacked viewer folder lacks its executable or app.asar.'
+          }
+          $hash = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash
+          Write-Host "BUILD ONLY: unsigned unpacked Windows desktop viewer folder; EXE SHA256=$hash; no installation, launch, upload or release."

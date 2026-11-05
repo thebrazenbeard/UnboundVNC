@@ -1,0 +1,83 @@
+# Windows desktop viewer — Electron packaged-folder experiment
+
+**This source is not a Windows installer or released viewer.** It builds an
+unsigned, unpacked Windows application folder on a public GitHub-hosted runner;
+the folder is deliberately **not uploaded or distributed**. End-user launch,
+installation, UI rendering, VNC interoperability, offline first-run behavior,
+signing, SmartScreen and uninstall remain separately unverified gates.
+
+## Choice, rejected shortcuts and cost
+
+| Candidate | What works | Why it is not the current installable answer |
+| --- | --- | --- |
+| PWA | Browser-managed launch icon; offline UI assets are possible | Requires browser installation and a separately owned Node gateway lifecycle. An installable icon alone cannot bridge the current RFB `/api` and `/ws`. |
+| WinForms/WebView2 | Small native window; Evergreen WebView2 often present on supported Windows | WebView2 runtime is a client prerequisite or separate licensed/offline runtime; it does **not** include Node 22+ for this gateway. Needs a separate safe backend bundle/lifecycle. |
+| Tauri | Leaner executable/NSIS or WiX route | Windows relies on WebView2 plus Rust toolchain; still needs a Node-gateway alternative, with installer behavior not yet verified. |
+| Electron (selected prototype) | Bundles Chromium and Node with one JavaScript application; no separate browser or paid relay | Larger footprint and dependency/notice work. `@electron/packager` produces an app **folder**, not an installer. Unsigned binaries face Windows reputation warnings. |
+
+Primary references: [Electron distribution](https://www.electronjs.org/docs/latest/tutorial/application-distribution),
+[Electron security](https://www.electronjs.org/docs/latest/tutorial/security),
+[WebView2 distribution](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/distribution),
+[Tauri Windows prerequisites](https://v2.tauri.app/start/prerequisites/),
+[PWA installability](https://developer.mozilla.org/en-US/docs/Web/Progressive_web_apps/Guides/Making_PWAs_installable).
+Electron and its toolchain are MIT-licensed, but bundled Chromium, Node and
+transitive components have distinct notices and redistribution obligations.
+UnboundVNC original code retains the repository's personal-use/commercial-rights
+license. A release needs a complete audited manifest and written redistribution
+authorization where required; free tooling does not erase those gates.
+
+## What the prototype source actually does
+
+- The desktop executable would open a sandboxed `BrowserWindow` containing the
+  **production Vite build** (saved devices/quick connect/session UI), not a
+  developer browser tab or Vite development server.
+- It starts the existing reviewed gateway on **random 127.0.0.1 ports**,
+  with only RFB TCP ports 5900 and 5901 allowed. It creates a separate loopback
+  static-server and same-origin `/api` + `/ws` forwarder because the current
+  viewer expects Vite's development proxy. The wrapper enforces exact Host and
+  Origin, then rewrites requests to the private gateway's accepted origin.
+- The Electron renderer has `nodeIntegration: false`, `contextIsolation: true`,
+  `sandbox: true`, disabled permission requests, blocked extra windows and
+  navigation, and a restrictive local Content Security Policy. No preload bridge,
+  external website, tracking, account, service, or firewall rule is created.
+- The user's explicit desktop launch owns both loopback servers. Closing the
+  window closes them and all proxy sockets. No auto-start, service, background
+  persistence, tunnel or public listener is registered.
+- The gateway retains its **loopback-only target restriction**, which means
+  this is **not yet a cross-network remote viewer** even if the form accepts
+  arbitrary hostnames. Native Windows attended-host port 5901 is admitted, but
+  the separate gateway half-close race and security reviews remain blockers.
+
+## Build/test steps (isolated developer/CI only)
+
+With Node 24 and Windows, from repository root:
+
+```powershell
+npm ci --prefix apps/viewer
+npm run build --prefix apps/viewer
+npm ci --prefix packaging/viewer-windows
+node --test packaging/viewer-windows/tests/local-server.test.mjs
+node packaging/viewer-windows/scripts/prepare.mjs
+& './packaging/viewer-windows/node_modules/.bin/electron-packager.cmd' packaging/viewer-windows UnboundVNCViewer --platform=win32 --arch=x64 --out="$env:TEMP\viewer-source-check" --asar
+```
+
+`prepare.mjs` deliberately requires a fresh absent `runtime/` directory rather
+than overwriting stale build content. The GitHub workflow runs from a fresh
+checkout and checks the `.exe`/`app.asar` shape. Do not distribute that output.
+The tests exercise the real gateway's local `/api` policy with temporary
+assets, host/origin denials, refused untrusted WS upgrade, and explicit close;
+they do not launch Electron or prove UI/remote session behavior.
+
+## Missing release and usability gates
+
+1. Clean, nondeveloper Windows 10/11 app-folder **launch and exit**; inspect
+   real displayed renderer, saved profiles, native window UX and full shutdown.
+2. Windows packaging with legitimate installer/uninstaller, per-user permissions,
+   updates/rollback, accurate uninstaller and data retention policy; no silent
+   autorun or service startup.
+3. Host/gateway signed consent and authentication, actual RFB interoperability,
+   secure remote transport, allowed target policy, and abrupt FIN/parser fix.
+4. Third-party SBOM and licenses for Electron/Chromium/Node/noVNC/Vite;
+   distribution permission, malware scanning, publisher signing and SmartScreen.
+5. Reproducible artifact digest, Windows 10/11 clean VM matrix, accessible UI
+   review and realistic offline tests before the word **installed** is used.
