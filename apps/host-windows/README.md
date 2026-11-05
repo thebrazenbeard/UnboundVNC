@@ -20,6 +20,12 @@ This test-owned pixel and synthetic approval are **hosted runner RUNTIME_PROBE**
 
 ## Disabled local input policy spike
 
+### Native-effect admission remains blocked
+
+The Windows CI `tests/host-windows-effect-safety` guard reflects the **actual built host managed DLL** (adjacent to its native `.exe` apphost), checks the existing `NativeInputAdapter.Enabled=false`/`TryInject=false` contract, and rejects added `user32.dll` imports except the three existing read-only desktop probes (`OpenInputDesktop`, `GetUserObjectInformationW`, `CloseDesktop`). The guard also rejects the common native input-effect entry points. This is a *bounded P/Invoke regression check*, not exhaustive proof against dynamic native loading or any other unsafe implementation.
+
+The same Windows job injects fake paired SendInput return counts, failed or throwing release callbacks, mid-effect cancellation, simulated desktop/UAC changes and a deterministic Stop/effect scheduling barrier into a **test-only** `FakeEffectGate`. A partial insertion attempts release once but is always denied and revokes; if release fails, an actual key/button might remain held. These tests deliberately make **no** native input calls and cannot qualify Windows UIPI, secure-desktop transitions, physical pointer/key state or real-machine Stop timing. Importing the native `SendInput`/`SetCursorPos` path from Draft #27 remains **NO-GO** until independent machine-level failure injection and interactive human consent are qualified.
+
 `ExperimentalInputPolicy` models the bytes *after* RFB KeyEvent (7 bytes) and PointerEvent (5 bytes) message types, with exact-length, range, key mapping and coordinate checks. The limited keyboard set is ASCII printable characters, Backspace, Tab, Enter, Escape and arrow keys. It rejects modifier keys, unsupported X11 keysyms, noncanonical down flags, nonzero padding, oversized payloads, out-of-frame coordinates, arithmetic overflow and unsupported pointer button bits (wheel/extended buttons). This deliberately incomplete mapping is not yet suitable for generic RFB viewer input interoperability.
 
 **No control path is enabled.** `NativeInputAdapter.Enabled` is false, both adapter methods always return false, no Win32 input API is imported, and the actual RFB session still discards KeyEvent and PointerEvent. There is deliberately no operational **Allow control** button: showing it before injection has been separately qualified would misrepresent what is available. The existing local approval continues to authorize view-only access exclusively.
