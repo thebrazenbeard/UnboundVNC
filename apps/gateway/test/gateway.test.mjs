@@ -4,7 +4,8 @@ import { createServer as createTcpServer, connect } from 'node:net';
 import { request } from 'node:http';
 import { randomBytes } from 'node:crypto';
 import { once } from 'node:events';
-import { createGateway } from '../src/server.mjs';
+import { spawn } from 'node:child_process';
+import { createGateway, parseAllowedPorts } from '../src/server.mjs';
 
 async function fixture(t, gatewayOptions = {}) {
   const rfb = createTcpServer(socket => {
@@ -211,6 +212,50 @@ test('only standard VNC port 5900 is allowed by default', async t => {
   assert.equal(standardVnc.status, 201);
 });
 
+test('explicit 5901 launch allowlist grants a loopback ticket without enabling arbitrary ports', async t => {
+  assert.deepEqual(parseAllowedPorts(undefined), [5900]);
+  assert.deepEqual(parseAllowedPorts('5901'), [5901]);
+  assert.deepEqual(parseAllowedPorts('5900,5901'), [5900, 5901]);
+  for (const bad of ['', '0', '65536', '5901,', '5901,5901', '5900-5902', '*', ' 5901', '5901 ', Array(33).fill('5901').join(',')]) {
+    assert.throws(() => parseAllowedPorts(bad), /UNBOUNDVNC_GATEWAY_ALLOWED_PORTS/);
+  }
+
+  // Use the real CLI entry point, not just a programmatic createGateway call.
+  const child = spawn(process.execPath, ['src/server.mjs'], {
+    cwd: new URL('../', import.meta.url),
+    env: { ...process.env, UNBOUNDVNC_GATEWAY_PORT: '0', UNBOUNDVNC_GATEWAY_ALLOWED_PORTS: '5901' },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  t.after(() => child.kill());
+  const url = await new Promise((resolve, reject) => {
+    let output = '';
+    let stderr = '';
+    child.stderr.on('data', chunk => { stderr += chunk; });
+    const timer = setTimeout(() => reject(new Error(`gateway CLI startup timeout: ${stderr}`)), 8000);
+    child.stdout.on('data', chunk => {
+      output += chunk;
+      const match = /UnboundVNC local RFB gateway: (http:\/\/127\.0\.0\.1:\d+)/.exec(output);
+      if (match) { clearTimeout(timer); resolve(match[1]); }
+    });
+    child.once('error', error => { clearTimeout(timer); reject(error); });
+    child.once('exit', code => { clearTimeout(timer); reject(new Error(`gateway CLI exited ${code}`)); });
+  });
+  const headers = { Origin: url, 'content-type': 'application/json' };
+  const ticket = await fetch(`${url}/api/sessions`, {
+    method: 'POST', headers, body: JSON.stringify({ host: '127.0.0.1', port: 5901 }),
+  });
+  assert.equal(ticket.status, 201);
+  assert.match((await ticket.json()).wsPath, /^\/ws\/session\//);
+  const denied = await fetch(`${url}/api/sessions`, {
+    method: 'POST', headers, body: JSON.stringify({ host: '127.0.0.1', port: 5900 }),
+  });
+  assert.equal(denied.status, 403);
+  const external = await fetch(`${url}/api/sessions`, {
+    method: 'POST', headers, body: JSON.stringify({ host: '192.168.1.42', port: 5901 }),
+  });
+  assert.equal(external.status, 400);
+});
+
 test('rejects a non-RFB localhost service even on an explicitly allowed port', async t => {
   const fake = createTcpServer(socket => socket.write('NOT RFB!! x\n'));
   await new Promise(resolve => fake.listen(0, '127.0.0.1', resolve));
@@ -286,6 +331,98 @@ test('a nearly complete 1 MiB frame followed by a coalesced second frame is acce
   }
   assert.equal(received, payload.length + small.length);
   assert.equal(connected.socket.destroyed, false);
+});
+
+test('one 1 MiB masked frame survives 4096 tiny TCP writes and a following frame', async t => {
+  const f = await fixture(t);
+  const ticket = await (await session(f)).json();
+  const connected = await upgrade(f, ticket.wsPath);
+  t.after(() => connected.socket.destroy());
+  assert.equal((await connected.nextFrame()).toString(), 'RFB 003.008\n');
+  const payload = Buffer.alloc(1024 * 1024, 0x5a);
+  const bytes = maskedBinary(payload);
+  const count = 4096;
+  const stride = Math.ceil(bytes.length / count);
+  for (let offset = 0; offset < bytes.length; offset += stride) {
+    if (!connected.socket.write(bytes.subarray(offset, offset + stride))) await once(connected.socket, 'drain');
+  }
+  connected.socket.write(maskedBinary('tail'));
+  let total = 0;
+  while (total < payload.length + 4) {
+    const packet = await connected.nextPacket();
+    assert.equal(packet.opcode, 2);
+    if (total < payload.length) assert.equal(packet.body[0], 0x5a);
+    total += packet.body.length;
+  }
+  assert.equal(total, payload.length + 4);
+  assert.equal(connected.socket.destroyed, false);
+});
+
+test('RFC 6455 rejects illegal control frames, invalid close reasons and noncanonical lengths', async t => {
+  const withFirst = (packet, first) => { const copy = Buffer.from(packet); copy[0] = first; return copy; };
+  const badFrames = [
+    ['fragmented Ping', withFirst(maskedFrame('a', 9), 0x09)],
+    ['fragmented Close', withFirst(maskedFrame(Buffer.alloc(0), 8), 0x08)],
+    ['Ping with extended-size marker', Buffer.from([0x89, 0xfe])],
+    ['Close with one-byte payload', maskedFrame(Buffer.from([0]), 8)],
+    ['Close with invalid UTF-8 reason', maskedFrame(Buffer.from([0x03, 0xe8, 0xc3, 0x28]), 8)],
+    ['Close with reserved 1005 code', maskedFrame(Buffer.from([0x03, 0xed]), 8)],
+    ['unknown opcode', maskedFrame('a', 3)],
+    ['unmasked payload', Buffer.from([0x82, 1, 0x41])],
+    ['nonminimal 16-bit length', Buffer.from([0x82, 0xfe, 0, 1, 0, 0, 0, 0, 0x41])],
+    ['nonminimal 64-bit length', Buffer.from([0x82, 0xff, 0, 0, 0, 0, 0, 0, 0, 126])],
+    ['over 1 MiB advertised length', Buffer.from([0x82, 0xff, 0, 0, 0, 0, 0, 0x10, 0, 1])],
+  ];
+  for (const [name, bytes] of badFrames) {
+    await t.test(name, async t => {
+      const f = await fixture(t);
+      const ticket = await (await session(f)).json();
+      const connected = await upgrade(f, ticket.wsPath);
+      t.after(() => connected.socket.destroy());
+      connected.socket.on('error', () => {});
+      assert.equal((await connected.nextFrame()).toString(), 'RFB 003.008\n');
+      const closed = once(connected.socket, 'close', { signal: AbortSignal.timeout(1500) });
+      connected.socket.write(bytes);
+      await closed;
+    });
+  }
+});
+
+test('valid masked Close echoes code and reason before TCP teardown', async t => {
+  const f = await fixture(t);
+  const ticket = await (await session(f)).json();
+  const connected = await upgrade(f, ticket.wsPath);
+  t.after(() => connected.socket.destroy());
+  assert.equal((await connected.nextFrame()).toString(), 'RFB 003.008\n');
+  const payload = Buffer.from([0x03, 0xe8, ...Buffer.from('done')]);
+  connected.socket.write(maskedFrame(payload, 8));
+  const response = await connected.nextPacket();
+  assert.equal(response.opcode, 8);
+  assert.deepEqual(response.body, payload);
+});
+
+test('fragmented binary RFB stream permits interleaved masked Ping control frames', async t => {
+  const f = await fixture(t);
+  const ticket = await (await session(f)).json();
+  const connected = await upgrade(f, ticket.wsPath);
+  t.after(() => connected.socket.destroy());
+  assert.equal((await connected.nextFrame()).toString(), 'RFB 003.008\n');
+  const first = maskedFrame('part-', 2);
+  first[0] &= 0x7f; // nonfinal binary fragment
+  connected.socket.write(Buffer.concat([first, maskedFrame('ping-data', 9), maskedFrame('two', 0)]));
+  let pong = null;
+  let rfbData = '';
+  // TCP may coalesce adjacent upstream RFB writes into a single WS packet.
+  for (let i = 0; i < 4 && (pong === null || rfbData.length < 8); i++) {
+    const packet = await connected.nextPacket();
+    if (packet.opcode === 10) pong = packet.body.toString();
+    else if (packet.opcode === 2) rfbData += packet.body.toString();
+    else assert.fail(`unexpected opcode ${packet.opcode}`);
+  }
+  assert.equal(pong, 'ping-data');
+  assert.equal(rfbData, 'part-two');
+  connected.socket.write(maskedBinary('next'));
+  assert.equal((await connected.nextFrame()).toString(), 'next');
 });
 
 test('sustained RFB traffic can exceed 64 MiB without lifetime-byte disconnect', async t => {

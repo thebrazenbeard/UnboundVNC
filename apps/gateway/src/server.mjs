@@ -9,6 +9,28 @@ const MAX_BUFFERED = MAX_FRAME + 14;
 const TICKET_MS = 30_000;
 const HEARTBEAT_MS = 30_000;
 const MAX_SOCKETS = 8;
+const utf8 = new TextDecoder('utf-8', { fatal: true });
+
+/** Optional CLI allowlist: comma-separated TCP ports, with no wildcard or range syntax. */
+export function parseAllowedPorts(value) {
+  if (value === undefined) return [5900];
+  if (typeof value !== 'string' || !/^[1-9][0-9]{0,4}(,[1-9][0-9]{0,4})*$/.test(value)) {
+    throw new Error('UNBOUNDVNC_GATEWAY_ALLOWED_PORTS must be comma-separated TCP ports');
+  }
+  const ports = value.split(',').map(Number);
+  if (ports.length > 32 || ports.some(port => port > 65535) || new Set(ports).size !== ports.length) {
+    throw new Error('UNBOUNDVNC_GATEWAY_ALLOWED_PORTS requires 1-32 unique valid TCP ports');
+  }
+  return ports;
+}
+
+function validClosePayload(payload) {
+  if (payload.length === 0) return true;
+  if (payload.length === 1) return false;
+  const code = payload.readUInt16BE(0);
+  if (!((code >= 1000 && code <= 1014 && ![1004, 1005, 1006].includes(code)) || (code >= 3000 && code <= 4999))) return false;
+  try { utf8.decode(payload.subarray(2)); return true; } catch { return false; }
+}
 
 function sendJson(res, status, value) {
   res.writeHead(status, {
@@ -112,18 +134,29 @@ export function createGateway({ port = 6081, host = '127.0.0.1', allowedPorts = 
     let upgraded = false;
     let closed = false;
     let rejecting = false;
-    let greeting = Buffer.alloc(0);
-    let buffered = Buffer.alloc(0);
+    // Never repeatedly concatenate a nearly complete 1 MiB frame when a
+    // peer feeds us tiny TCP reads. A frame is copied at most when appended
+    // and, if necessary, once when compacting the bounded receive window.
+    const greeting = Buffer.allocUnsafe(12);
+    let greetingLength = 0;
+    const buffered = Buffer.allocUnsafe(MAX_BUFFERED);
+    let bufferStart = 0;
+    let bufferEnd = 0;
     let fragment = false;
     let heartbeatTimer;
     let expectedPong = null;
-    function cleanup() {
+    function cleanup(closePayload) {
       if (closed) return;
       closed = true;
       clearInterval(heartbeatTimer);
       connections.delete(cleanup);
       rfb.destroy();
-      if (!rejecting) ws.destroy();
+      if (!rejecting) {
+        // A valid masked Close deserves a matching Close reply before TCP FIN.
+        // Error/timeout/abrupt transport teardown still destroys immediately.
+        if (Buffer.isBuffer(closePayload)) ws.end(frame(8, closePayload));
+        else ws.destroy();
+      }
     }
     connections.add(cleanup);
     ws.on('error', cleanup);
@@ -156,16 +189,22 @@ export function createGateway({ port = 6081, host = '127.0.0.1', allowedPorts = 
     rfb.on('data', data => {
       if (closed) return;
       if (!upgraded) {
-        greeting = Buffer.concat([greeting, data]);
-        if (greeting.length < 12) return;
-        if (!/^RFB [0-9]{3}\.[0-9]{3}\n$/.test(greeting.subarray(0, 12).toString('ascii'))) {
+        const length = Math.min(12 - greetingLength, data.length);
+        data.copy(greeting, greetingLength, 0, length);
+        greetingLength += length;
+        if (greetingLength < 12) return;
+        if (!/^RFB [0-9]{3}\.[0-9]{3}\n$/.test(greeting.toString('ascii'))) {
           rejecting = true;
           rejectUpgrade(ws, 403);
           return cleanup();
         }
         acceptRfb();
-        data = greeting;
-        greeting = Buffer.alloc(0);
+        if (closed) return;
+        // Preserve the exact RFB byte stream if the greeting and next protocol
+        // bytes arrived in one TCP read, without buffering that whole read.
+        if (!ws.write(frame(2, greeting))) rfb.pause();
+        data = data.subarray(length);
+        if (!data.length) return;
       }
       if (!ws.write(frame(2, data))) rfb.pause();
     });
@@ -173,52 +212,66 @@ export function createGateway({ port = 6081, host = '127.0.0.1', allowedPorts = 
     rfb.on('drain', () => ws.resume());
     ws.on('data', data => { if (upgraded && !closed) ingest(data); });
     function ingest(data) {
-      // A TCP read can coalesce multiple valid WebSocket frames. Append in
-      // bounded pieces and parse between them rather than rejecting the read.
+      // A TCP read may contain many frames, or one frame may arrive one byte
+      // at a time. A fixed sliding window bounds memory and total copying.
       let offset = 0;
       while (offset < data.length && !closed) {
-        const room = MAX_BUFFERED - buffered.length;
-        if (room <= 0) return cleanup();
-        const count = Math.min(room, data.length - offset);
-        buffered = Buffer.concat([buffered, data.subarray(offset, offset + count)]);
+        if (bufferEnd === MAX_BUFFERED) {
+          if (bufferStart === 0) return cleanup();
+          buffered.copyWithin(0, bufferStart, bufferEnd);
+          bufferEnd -= bufferStart;
+          bufferStart = 0;
+        }
+        const count = Math.min(MAX_BUFFERED - bufferEnd, data.length - offset);
+        data.copy(buffered, bufferEnd, offset, offset + count);
+        bufferEnd += count;
         offset += count;
         parseBuffered();
       }
     }
     function parseBuffered() {
-      while (buffered.length >= 2) {
-        const first = buffered[0];
-        const second = buffered[1];
+      while (bufferEnd - bufferStart >= 2) {
+        const available = bufferEnd - bufferStart;
+        const first = buffered[bufferStart];
+        const second = buffered[bufferStart + 1];
         const opcode = first & 15;
         const fin = Boolean(first & 0x80);
         const masked = Boolean(second & 0x80);
+        if (!masked || (first & 0x70) || ![0, 2, 8, 9, 10].includes(opcode)) return cleanup();
+        // Control frames must be unfragmented and contain at most 125 bytes;
+        // reject their invalid length markers before waiting for the payload.
+        if (opcode >= 8 && (!fin || (second & 127) > 125)) return cleanup();
         let payloadSize = second & 127;
         let header = 2;
         if (payloadSize === 126) {
-          if (buffered.length < 4) return;
-          payloadSize = buffered.readUInt16BE(2); header = 4;
+          if (available < 4) return;
+          payloadSize = buffered.readUInt16BE(bufferStart + 2); header = 4;
+          if (payloadSize < 126) return cleanup();
         } else if (payloadSize === 127) {
-          if (buffered.length < 10) return;
-          const big = buffered.readBigUInt64BE(2);
+          if (available < 10) return;
+          const big = buffered.readBigUInt64BE(bufferStart + 2);
+          if (big <= 65535n) return cleanup();
           if (big > BigInt(MAX_FRAME)) return cleanup();
           payloadSize = Number(big); header = 10;
         }
-        if (!masked || (first & 0x70) || payloadSize > MAX_FRAME) return cleanup();
-        if (buffered.length < header + 4 + payloadSize) return;
-        const mask = buffered.subarray(header, header + 4);
-        const payload = Buffer.from(buffered.subarray(header + 4, header + 4 + payloadSize));
-        buffered = buffered.subarray(header + 4 + payloadSize);
+        if (payloadSize > MAX_FRAME) return cleanup();
+        if (available < header + 4 + payloadSize) return;
+        const mask = buffered.subarray(bufferStart + header, bufferStart + header + 4);
+        const payload = Buffer.from(buffered.subarray(bufferStart + header + 4, bufferStart + header + 4 + payloadSize));
+        bufferStart += header + 4 + payloadSize;
+        if (bufferStart === bufferEnd) bufferStart = bufferEnd = 0;
         for (let i = 0; i < payload.length; i++) payload[i] ^= mask[i % 4];
-        if (opcode === 8) { ws.write(frame(8)); return cleanup(); }
-        if (opcode === 9) { if (payload.length > 125 || !fin) return cleanup(); ws.write(frame(10, payload)); continue; }
+        if (opcode === 8) {
+          if (!validClosePayload(payload)) return cleanup();
+          return cleanup(payload);
+        }
+        if (opcode === 9) { ws.write(frame(10, payload)); continue; }
         if (opcode === 10) {
-          if (payload.length > 125 || !fin) return cleanup();
           // RFC 6455 permits unsolicited Pong. Only the matching outstanding
           // challenge proves that this peer read our most recent Ping.
           if (expectedPong?.equals(payload)) expectedPong = null;
           continue;
         }
-        if (opcode !== 2 && opcode !== 0) return cleanup();
         if (opcode === 0 && !fragment || opcode === 2 && fragment) return cleanup();
         fragment = !fin;
         if (!rfb.write(payload)) ws.pause();
@@ -241,6 +294,9 @@ export function createGateway({ port = 6081, host = '127.0.0.1', allowedPorts = 
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const gateway = createGateway({ port: Number(process.env.UNBOUNDVNC_GATEWAY_PORT ?? 6081) });
+  const gateway = createGateway({
+    port: Number(process.env.UNBOUNDVNC_GATEWAY_PORT ?? 6081),
+    allowedPorts: parseAllowedPorts(process.env.UNBOUNDVNC_GATEWAY_ALLOWED_PORTS),
+  });
   gateway.listen().then(url => process.stdout.write(`UnboundVNC local RFB gateway: ${url}\n`)).catch(error => { console.error(error); process.exitCode = 1; });
 }
