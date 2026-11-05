@@ -27,3 +27,10 @@ test('source offers a keyboard-reachable way back to the noVNC canvas after focu
   assert.match(js, /getElementById\('session-focus-remote'\)\.addEventListener\('click'/);
   assert.match(js, /state\.connection\?\.rfb\?\.focus\(\{ preventScroll: true \}\)/);
 });
+
+test('Fit screen retains an accessible name when responsive toolbar text is hidden', () => {
+  const css = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8');
+  const js = readFileSync(new URL('../src/main.js', import.meta.url), 'utf8');
+  assert.match(css, /\.session-action span\s*\{\s*display:\s*none/);
+  assert.match(js, /id="session-scale"[^>]*aria-label="Fit screen"/);
+});
