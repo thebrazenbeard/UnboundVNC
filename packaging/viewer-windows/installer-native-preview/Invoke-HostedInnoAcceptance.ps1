@@ -17,6 +17,7 @@ $fixtureScript = [IO.Path]::GetFullPath('packaging/viewer-windows/tests/ci-rfb-f
 $iss = [IO.Path]::GetFullPath('packaging/viewer-windows/installer-native-preview/UnboundVNCViewer-CI.iss')
 $marker = Join-Path $root '.native-ci-owned'
 $ownerFile = Join-Path $root '.native-owner-input'
+$manifestFile = Join-Path $root '.native-manifest-input'
 $installedOwner = Join-Path $install '.unboundvnc-ci-installer-owned'
 $exe = Join-Path $install 'UnboundVNCViewer.exe'
 $fixture = $null
@@ -74,6 +75,37 @@ function Assert-SourcePreserved([hashtable]$before) {
   Assert-ManifestEqual $before (Get-FileManifest $source)
 }
 
+function Assert-NativePayloadStillPresent([hashtable]$before,[string]$case) {
+  if(-not (Test-Path -LiteralPath $install -PathType Container)) { throw "Native uninstaller deleted its installed folder during rejected $case." }
+  foreach($name in $before.Keys) {
+    $file=Join-Path $install $name
+    if(-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "Native uninstaller deleted owned payload $name during rejected $case." }
+    $actual="$( (Get-Item -LiteralPath $file).Length ):$((Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash)"
+    if($actual -cne $before[$name]) { throw "Native uninstaller changed owned payload $name during rejected $case." }
+  }
+}
+
+function Invoke-NativeUninstallerBounded([string]$uninstaller,[string]$case) {
+  $proc=Start-Process -FilePath $uninstaller -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART') -PassThru
+  try {
+    if(-not $proc.WaitForExit(25000)) { throw "Native uninstaller hung in $case instead of refusing; 25-second limit." }
+    return $proc.ExitCode
+  } finally {
+    if(-not $proc.HasExited) { $proc.Kill(); $null=$proc.WaitForExit(5000) }
+  }
+}
+
+function Assert-NativeUninstallRefusal([string]$case,[hashtable]$before,[string]$uninstaller,[string]$decoy,[string]$decoyHash) {
+  $exit=Invoke-NativeUninstallerBounded $uninstaller $case
+  Assert-NativePayloadStillPresent $before $case
+  if(-not (Test-Path -LiteralPath $decoy -PathType Leaf) -or
+      (Get-FileHash -LiteralPath $decoy -Algorithm SHA256).Hash -cne $decoyHash) {
+    throw "Native uninstaller changed non-owned decoy in $case."
+  }
+  if($exit -eq 0) { throw "Native uninstaller reported SUCCESS despite unsafe $case." }
+  Write-Host "NATIVE UNINSTALL REFUSAL PASS ($case): actual unins EXE returned $exit; all $($before.Count) application SHA256 and non-owned decoy intact."
+}
+
 function Assert-InstallOwned([hashtable]$before) {
   if (-not (Test-Path -LiteralPath $exe -PathType Leaf) -or
       -not (Test-Path -LiteralPath $installedOwner -PathType Leaf) -or
@@ -91,6 +123,7 @@ function Assert-InstallOwned([hashtable]$before) {
     $null=$installed.Remove($name)
   }
   $null=$installed.Remove('.unboundvnc-ci-installer-owned')
+  $null=$installed.Remove('.unboundvnc-ci-manifest')
   foreach($name in @($installed.Keys)) {
     if($name -notmatch '^unins[0-9]+\.(exe|dat)$') {
       throw "Native Inno install added unknown content: $name"
@@ -113,6 +146,17 @@ try {
   $null=New-Item -ItemType Directory -Path $build -Force
   Set-Content -LiteralPath $marker -Value $guid -NoNewline
   Set-Content -LiteralPath $ownerFile -Value $guid -NoNewline
+  $manifestRows=@($before.Keys | Sort-Object | ForEach-Object {
+    $relative=$_
+    if($relative -match '[|\r\n]' -or [IO.Path]::IsPathRooted($relative) -or $relative -match '(^|[\\/])\.\.([\\/]|$)') {
+      throw "Unsafe source path in native manifest: $relative"
+    }
+    $parts=$before[$relative] -split ':'
+    if($parts.Count -ne 2 -or $parts[1] -notmatch '^[0-9A-F]{64}$') { throw "Invalid SHA256 source entry: $relative" }
+    "$($parts[1])|$($relative.Replace('/','\'))"
+  })
+  Set-Content -LiteralPath $manifestFile -Encoding ascii -Value $manifestRows
+  $manifestHash=(Get-FileHash -LiteralPath $manifestFile -Algorithm SHA256).Hash
 
   $compiler = 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
   if(-not (Test-Path -LiteralPath $compiler -PathType Leaf)) { throw 'Pinned runner Inno Setup 6 compiler unavailable; no unverified download allowed.' }
@@ -128,7 +172,8 @@ try {
     # This script has no SignTool directive, and the output signature is verified below.
     "-dCI_Source=$source","-dCI_Target=$install",
     "-dCI_Output=$build","-dCI_OwnerFile=$ownerFile",
-    "-dCI_Guid=$guid",$iss
+    "-dCI_Guid=$guid","-dCI_ManifestFile=$manifestFile",
+    "-dCI_ManifestHash=$manifestHash","-dCI_ManifestCount=$($manifestRows.Count)",$iss
   )
   & $compiler @compilerArgs
   if($LASTEXITCODE -ne 0) { throw 'CI-only Inno setup compilation failed.' }
@@ -220,12 +265,49 @@ try {
   }
 
   $uninstaller=Assert-InstallOwned $before
-  $removed=Start-Process -FilePath $uninstaller -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART') -PassThru -Wait
-  if($removed.ExitCode -ne 0) { throw "Native Inno uninstaller returned $($removed.ExitCode)." }
+  $decoy=Join-Path $root 'native-nonowned-decoy.txt'
+  Set-Content -LiteralPath $decoy -Value 'test-owned decoy not part of install' -NoNewline
+  $decoyHash=(Get-FileHash -LiteralPath $decoy -Algorithm SHA256).Hash
+  Set-Content -LiteralPath $installedOwner -Value "wrong-$guid" -NoNewline
+  try { Assert-NativeUninstallRefusal 'altered ownership marker' $before $uninstaller $decoy $decoyHash }
+  finally { Set-Content -LiteralPath $installedOwner -Value $guid -NoNewline }
+  Remove-Item -LiteralPath $installedOwner
+  try { Assert-NativeUninstallRefusal 'missing ownership marker' $before $uninstaller $decoy $decoyHash }
+  finally { Set-Content -LiteralPath $installedOwner -Value $guid -NoNewline }
+
+  $nativeUnknown=Join-Path $install 'native-unlisted-user-file.txt'
+  Set-Content -LiteralPath $nativeUnknown -Value 'non-owned test fixture' -NoNewline
+  try {
+    $unknownHash=(Get-FileHash -LiteralPath $nativeUnknown -Algorithm SHA256).Hash
+    Assert-NativeUninstallRefusal 'unknown installed file' $before $uninstaller $nativeUnknown $unknownHash
+    Assert-NativeUninstallRefusal 'unknown installed file preserves sibling' $before $uninstaller $decoy $decoyHash
+  } finally { if(Test-Path -LiteralPath $nativeUnknown) { Remove-Item -LiteralPath $nativeUnknown } }
+
+  $nativeTarget=Join-Path $root 'native-junction-target'
+  $nativeJunction=Join-Path $install 'native-junction-must-refuse'
+  $null=New-Item -ItemType Directory -Path $nativeTarget
+  $nativeSentinel=Join-Path $nativeTarget 'preserve.txt'
+  Set-Content -LiteralPath $nativeSentinel -Value 'preserve junction target' -NoNewline
+  try {
+    $null=New-Item -ItemType Junction -Path $nativeJunction -Target $nativeTarget
+    $sentinelHash=(Get-FileHash -LiteralPath $nativeSentinel -Algorithm SHA256).Hash
+    Assert-NativeUninstallRefusal 'installed junction reparse' $before $uninstaller $nativeSentinel $sentinelHash
+    Assert-NativeUninstallRefusal 'junction preserves sibling' $before $uninstaller $decoy $decoyHash
+  } finally {
+    if(Test-Path -LiteralPath $nativeJunction) { Remove-Item -LiteralPath $nativeJunction -Force }
+    if(Test-Path -LiteralPath $nativeJunction) { throw 'Refusing cleanup of unresolved native junction.' }
+    Remove-Item -LiteralPath $nativeTarget -Recurse -Force
+  }
+
+  $uninstaller=Assert-InstallOwned $before
+  $nativeExit=Invoke-NativeUninstallerBounded $uninstaller 'clean expected uninstall'
+  if($nativeExit -ne 0) { throw "Native Inno uninstaller returned $nativeExit." }
   $deadline=[DateTime]::UtcNow.AddSeconds(15)
   while((Test-Path -LiteralPath $install) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 200 }
   if(Test-Path -LiteralPath $install) { throw 'Native Inno uninstall did not remove its installed folder.' }
   if(-not (Test-Path -LiteralPath $profile -PathType Container)) { throw 'Native uninstaller removed separate profile unexpectedly.' }
+  if(-not (Test-Path -LiteralPath $decoy -PathType Leaf) -or
+      (Get-FileHash -LiteralPath $decoy -Algorithm SHA256).Hash -cne $decoyHash) { throw 'Clean native uninstall touched non-owned sibling decoy.' }
   if((@(Get-UninstallKeys) -join '|') -cne ($registryBefore -join '|')) { throw 'Uninstaller modified current-user ARP registry keys.' }
   Assert-SourcePreserved $before
   Write-Host "NATIVE UNINSTALL TEST PASS: actual Inno uninstaller removed $($before.Count) app files; separate profile retained; all source SHA256 unchanged; no HKCU ARP delta."

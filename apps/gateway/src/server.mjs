@@ -6,6 +6,9 @@ import { pathToFileURL } from 'node:url';
 const MAX_BODY = 1024;
 const MAX_FRAME = 1024 * 1024;
 const MAX_BUFFERED = MAX_FRAME + 14;
+// Control frames bypass upstream RFB backpressure. Do not allow a client that
+// sends Pings without reading Pongs to accumulate an unlimited write queue.
+const MAX_CONTROL_OUTBOUND = 256 * 1024;
 const TICKET_MS = 30_000;
 const HEARTBEAT_MS = 30_000;
 const MAX_SOCKETS = 8;
@@ -330,7 +333,12 @@ export function createGateway({ port = 6081, host = '127.0.0.1', allowedPorts = 
           if (!validClosePayload(payload)) return cleanup();
           return cleanup(payload);
         }
-        if (opcode === 9) { ws.write(frame(10, payload)); continue; }
+        if (opcode === 9) {
+          const reply = frame(10, payload);
+          if (ws.writableLength + reply.length > MAX_CONTROL_OUTBOUND) return cleanup();
+          ws.write(reply);
+          continue;
+        }
         if (opcode === 10) {
           // RFC 6455 permits unsolicited Pong. Only the matching outstanding
           // challenge proves that this peer read our most recent Ping.
