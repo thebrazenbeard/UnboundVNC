@@ -43,9 +43,9 @@ function maskedFrame(payload, opcode) {
   return Buffer.concat([header, encoded]);
 }
 
-async function upgrade(f, wsPath, origin = f.origin) {
+async function upgrade(f, wsPath, origin = f.origin, socketOptions = {}) {
   const { port } = new URL(f.url);
-  const socket = connect({ host: '127.0.0.1', port: Number(port) });
+  const socket = connect({ host: '127.0.0.1', port: Number(port), ...socketOptions });
   const key = randomBytes(16).toString('base64');
   socket.write(`GET ${wsPath} HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: ${key}\r\nOrigin: ${origin}\r\n\r\n`);
   let cache = Buffer.alloc(0);
@@ -399,6 +399,33 @@ test('valid masked Close echoes code and reason before TCP teardown', async t =>
   const response = await connected.nextPacket();
   assert.equal(response.opcode, 8);
   assert.deepEqual(response.body, payload);
+});
+
+test('valid masked Close cannot strand a TCP half-open peer outside gateway tracking', async t => {
+  const rfb = createTcpServer(socket => socket.write('RFB 003.008\n'));
+  await new Promise(resolve => rfb.listen(0, '127.0.0.1', resolve));
+  const gateway = createGateway({ port: 0, allowedPorts: [rfb.address().port] });
+  const url = await gateway.listen();
+  const ticket = await (await session({ url, origin: url, port: rfb.address().port })).json();
+  const incoming = once(gateway.server, 'connection');
+  // allowHalfOpen keeps our TCP write side open after gateway's FIN. A
+  // malicious/nonconformant peer can therefore withhold its own FIN forever.
+  const connected = await upgrade({ url, origin: url }, ticket.wsPath, url, { allowHalfOpen: true });
+  const [serverSocket] = await incoming;
+  t.after(async () => {
+    connected.socket.destroy();
+    serverSocket.destroy();
+    await gateway.close();
+    await new Promise(resolve => rfb.close(resolve));
+  });
+  assert.equal((await connected.nextFrame()).toString(), 'RFB 003.008\n');
+  const peerClosed = once(serverSocket, 'close', { signal: AbortSignal.timeout(800) });
+  const payload = Buffer.from([0x03, 0xe8, ...Buffer.from('done')]);
+  connected.socket.write(maskedFrame(payload, 8));
+  const echoed = await connected.nextPacket();
+  assert.equal(echoed.opcode, 8);
+  assert.deepEqual(echoed.body, payload);
+  await peerClosed;
 });
 
 test('fragmented binary RFB stream permits interleaved masked Ping control frames', async t => {
