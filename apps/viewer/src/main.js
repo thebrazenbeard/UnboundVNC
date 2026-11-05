@@ -14,6 +14,7 @@ const state = {
   gateway: 'checking',
   sessionReturnFocus: null,
   lastFailure: null,
+  remoteClipboardText: null,
 };
 
 const glyph = {
@@ -27,6 +28,7 @@ const glyph = {
   eye: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>',
   expand: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h7M4 4v7M20 20h-7m7 0v-7M20 4l-7 7M4 20l7-7"/></svg>',
   close: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5l14 14M19 5 5 19"/></svg>',
+  clipboard: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="4" width="14" height="18" rx="2"/><rect x="9" y="2" width="6" height="5" rx="1"/><path d="M8 12h8M8 16h6"/></svg>',
   search: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></svg>',
   shield: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2 4 5v6c0 5.2 3.3 9.2 8 11 4.7-1.8 8-5.8 8-11V5l-8-3Z"/><path d="m8 12 3 3 5-6"/></svg>',
 };
@@ -97,7 +99,7 @@ app.innerHTML = `
   <section id="session-view" class="session-view" aria-label="Remote desktop session" hidden>
     <div class="session-topbar"><div class="session-identity"><span class="session-online-dot"></span><div><strong id="session-name">Remote session</strong><small id="session-address"></small></div></div>
       <span id="session-status" class="session-status" role="status" aria-live="polite">Connecting…</span>
-      <div class="session-actions"><button id="session-viewonly" class="session-action" type="button" aria-label="View only" aria-pressed="false" title="Disable local keyboard and mouse input">${glyph.eye}<span>View only</span></button><button id="session-scale" class="session-action active" type="button" aria-label="Fit screen" aria-pressed="true" title="Fit remote display to window">${glyph.expand}<span>Fit screen</span></button><button id="session-fullscreen" class="session-action" type="button" title="Fullscreen">${glyph.maximize}<span>Fullscreen</span></button><button id="session-disconnect" class="session-action disconnect" type="button" aria-label="Disconnect">${glyph.close}<span>Disconnect</span></button><button id="session-focus-remote" class="session-action" type="button" aria-label="Focus remote desktop" title="Return keyboard to remote desktop" disabled>${glyph.monitor}<span>Focus remote</span></button></div>
+      <div class="session-actions"><button id="session-viewonly" class="session-action" type="button" aria-label="View only" aria-pressed="false" title="Disable local keyboard and mouse input">${glyph.eye}<span>View only</span></button><button id="session-scale" class="session-action active" type="button" aria-label="Fit screen" aria-pressed="true" title="Fit remote display to window">${glyph.expand}<span>Fit screen</span></button><button id="session-fullscreen" class="session-action" type="button" title="Fullscreen">${glyph.maximize}<span>Fullscreen</span></button><button id="session-clipboard-open" class="session-action" type="button" aria-label="Text clipboard" title="Exchange plain text with the remote session" disabled>${glyph.clipboard}<span>Clipboard</span></button><button id="session-disconnect" class="session-action disconnect" type="button" aria-label="Disconnect">${glyph.close}<span>Disconnect</span></button><button id="session-focus-remote" class="session-action" type="button" aria-label="Focus remote desktop" title="Return keyboard to remote desktop" disabled>${glyph.monitor}<span>Focus remote</span></button></div>
     </div><div id="session-stage" class="session-stage"><div id="remote-screen" aria-label="Remote desktop framebuffer"></div></div>
     <div class="session-footnote">Ctrl+Alt+Shift+Escape returns keyboard focus from the remote canvas to session controls. View-only is a viewer control, not host-side authorization. Gateway-to-host traffic may not be encrypted.</div>
   </section>
@@ -113,6 +115,12 @@ app.innerHTML = `
     <p class="modal-hint">The VNC server requested credentials. They are used for this session only. A VNC password does not establish encrypted transport or server identity; the gateway-to-host connection may be unencrypted.</p><label>Username <input name="username" autocomplete="username" placeholder="If required"/></label><label>Password <input name="password" type="password" autocomplete="off" autofocus placeholder="VNC password"/></label>
     <div class="modal-footer"><button id="credentials-cancel" class="btn btn-quiet" type="button">Disconnect</button><button class="btn btn-primary" type="submit">Authenticate ${glyph.arrow}</button></div>
   </form></dialog>
+  <dialog id="session-clipboard-dialog" class="modal" aria-labelledby="session-clipboard-title"><div class="modal-header"><div><p class="section-kicker">SESSION ONLY</p><h2 id="session-clipboard-title">Text clipboard</h2></div></div>
+    <p class="modal-hint">Plain text only. Nothing is read from your local clipboard automatically. Send text intentionally, or copy text offered by the remote server with a separate click. VNC traffic may be unencrypted.</p>
+    <label for="session-clipboard-text">Text to send to remote</label><textarea id="session-clipboard-text" rows="4" maxlength="65536" spellcheck="false" autocomplete="off" placeholder="Paste or type text here"></textarea>
+    <p id="session-clipboard-status" class="modal-hint" role="status" aria-live="polite">No remote text received yet.</p>
+    <div class="modal-footer clipboard-footer"><button id="session-clipboard-close" class="btn btn-quiet" type="button">Close</button><button id="session-clipboard-copy" class="btn btn-quiet" type="button" disabled>Copy from remote</button><button id="session-clipboard-send" class="btn btn-primary" type="button">Send to remote</button></div>
+  </dialog>
   <dialog id="identity-dialog" class="modal" aria-labelledby="identity-title"><div class="modal-header"><div><p class="section-kicker">VERIFY YOUR DESTINATION</p><h2 id="identity-title">Confirm server identity</h2></div></div><p id="identity-detail" class="modal-hint">Compare this key fingerprint with one obtained through a trusted, separate channel. Do not approve an unknown or changed fingerprint.</p>
     <p class="modal-hint">SHA-256 server key fingerprint:</p><code id="identity-fingerprint" class="identity-fingerprint" aria-live="polite">Calculating…</code>
     <div class="modal-footer"><button class="btn btn-quiet" id="identity-reject" type="button">Disconnect</button><button class="btn btn-quiet" id="identity-reset" type="button" hidden>Forget old key and disconnect</button><button class="btn btn-primary" id="identity-approve" type="button" disabled>I verified this key</button></div></dialog>
@@ -161,6 +169,13 @@ function closeDialog(id) {
   if (dialog.open) dialog.close();
 }
 
+function clearSessionClipboard() {
+  state.remoteClipboardText = null;
+  document.getElementById('session-clipboard-text').value = '';
+  document.getElementById('session-clipboard-copy').disabled = true;
+  document.getElementById('session-clipboard-status').textContent = 'No remote text received yet.';
+}
+
 function renderConnectionError() {
   const panel = document.getElementById('connection-error');
   document.getElementById('connection-error-message').textContent = state.lastFailure?.message ?? '';
@@ -186,6 +201,8 @@ function clearConnectionFailure() {
 function showSession(device, viewOnly = false) {
   state.sessionReturnFocus = captureFocus(document.activeElement);
   clearConnectionFailure();
+  clearSessionClipboard();
+  document.getElementById('session-clipboard-open').disabled = true;
   document.querySelector('#session-name').textContent = device.name;
   document.querySelector('#session-address').textContent = describeEndpoint(device);
   document.querySelector('#session-status').textContent = 'Connecting…';
@@ -208,6 +225,9 @@ function hideSession() {
   document.body.classList.remove('session-active');
   document.querySelector('#remote-screen').replaceChildren();
   document.querySelector('#session-focus-remote').disabled = true;
+  document.getElementById('session-clipboard-open').disabled = true;
+  closeDialog('session-clipboard-dialog');
+  clearSessionClipboard();
   closeDialog('credentials-dialog');
   // A user may cancel VncAuth after typing but before submitting. Drop both
   // fields on every session exit so the next prompt cannot expose stale input.
@@ -246,7 +266,7 @@ async function connectTo(device, viewOnly = false) {
   }
   showSession(target, viewOnly);
   const connection = {
-    device, target, rfb: null, manual: false, viewOnly, abortController: new AbortController(),
+    device, target, rfb: null, manual: false, viewOnly, connected: false, abortController: new AbortController(),
     verificationReady: false, pendingFingerprint: null, verifiedFingerprint: null,
     identityChanged: false, verificationAttempt: 0,
   };
@@ -282,9 +302,11 @@ async function connectTo(device, viewOnly = false) {
         notify(error.message, 'error');
         return;
       }
+      connection.connected = true;
       document.querySelector('#session-status').textContent = connection.verifiedFingerprint
         ? 'Connected · RSA key verified' : 'Connected · identity unverified';
       document.querySelector('#session-focus-remote').disabled = false;
+      document.getElementById('session-clipboard-open').disabled = connection.viewOnly;
       rfb.focus({ preventScroll: true });
       if (device.id) {
         const stored = state.devices.find(d => d.id === device.id);
@@ -348,6 +370,21 @@ async function connectTo(device, viewOnly = false) {
       if (state.connection !== connection) return;
       connection.failureMessage = `VNC authentication failed${event.detail?.reason ? ': ' + event.detail.reason : '.'}`;
       notify(connection.failureMessage, 'error');
+    });
+    rfb.addEventListener('clipboard', event => {
+      if (state.connection !== connection || rfb.viewOnly) return;
+      const text = event.detail?.text;
+      if (typeof text !== 'string') return;
+      if (text.length > 65536) {
+        clearSessionClipboard();
+        document.getElementById('session-clipboard-status').textContent = 'Remote clipboard text exceeds the 64 KiB limit.';
+        return;
+      }
+      state.remoteClipboardText = text || null;
+      document.getElementById('session-clipboard-copy').disabled = !text;
+      document.getElementById('session-clipboard-status').textContent = text
+        ? 'Remote text is available. Copy it only if you trust this session.'
+        : 'Remote clipboard is empty.';
     });
     rfb.addEventListener('disconnect', () => {
       if (state.connection !== connection) return;
@@ -457,6 +494,39 @@ document.getElementById('session-disconnect').addEventListener('click', () => { 
 document.getElementById('session-focus-remote').addEventListener('click', () => {
   state.connection?.rfb?.focus({ preventScroll: true });
 });
+document.getElementById('session-clipboard-open').addEventListener('click', () => {
+  const connection = state.connection;
+  if (!connection?.connected || connection.rfb?.viewOnly) return;
+  document.getElementById('session-clipboard-dialog').showModal();
+  document.getElementById('session-clipboard-text').focus();
+});
+document.getElementById('session-clipboard-close').addEventListener('click', () => {
+  closeDialog('session-clipboard-dialog');
+});
+document.getElementById('session-clipboard-dialog').addEventListener('close', clearSessionClipboard);
+document.getElementById('session-clipboard-send').addEventListener('click', () => {
+  const connection = state.connection;
+  if (!connection?.connected || connection.rfb?.viewOnly) return;
+  const field = document.getElementById('session-clipboard-text');
+  if (!field.value) return;
+  connection.rfb.clipboardPasteFrom(field.value);
+  field.value = '';
+  document.getElementById('session-clipboard-status').textContent = 'Text sent to the VNC connection.';
+});
+document.getElementById('session-clipboard-copy').addEventListener('click', async () => {
+  const text = state.remoteClipboardText;
+  if (!text || !state.connection?.connected || state.connection.rfb?.viewOnly) return;
+  try {
+    await navigator.clipboard.writeText(text);
+    if (state.remoteClipboardText === text) {
+      state.remoteClipboardText = null;
+      document.getElementById('session-clipboard-copy').disabled = true;
+    }
+    document.getElementById('session-clipboard-status').textContent = 'Remote text copied to your browser clipboard.';
+  } catch {
+    document.getElementById('session-clipboard-status').textContent = 'Browser clipboard permission unavailable. Remote text was not copied.';
+  }
+});
 document.getElementById('session-viewonly').addEventListener('click', event => {
   const rfb = state.connection?.rfb;
   if (!rfb) return;
@@ -464,6 +534,8 @@ document.getElementById('session-viewonly').addEventListener('click', event => {
   state.connection.viewOnly = rfb.viewOnly;
   event.currentTarget.classList.toggle('active', rfb.viewOnly);
   event.currentTarget.setAttribute('aria-pressed', String(rfb.viewOnly));
+  document.getElementById('session-clipboard-open').disabled = rfb.viewOnly;
+  if (rfb.viewOnly) clearSessionClipboard();
   notify(rfb.viewOnly ? 'View-only enabled in this viewer.' : 'Mouse and keyboard enabled in this viewer.');
 });
 document.getElementById('session-scale').addEventListener('click', event => {
