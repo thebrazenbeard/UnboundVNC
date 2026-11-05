@@ -82,6 +82,10 @@ jobs:
             $env:UNBOUNDVNC_DESKTOP_CI_SMOKE = '1'
             $process = Start-Process -FilePath $exe -PassThru
             if (-not $process.WaitForExit(45000)) { throw 'Desktop app did not exit after CI smoke.' }
+            $errorReceipt = Join-Path $env:RUNNER_TEMP 'unboundvnc-viewer-smoke-error.txt'
+            if (Test-Path -LiteralPath $errorReceipt) {
+              Write-Host "CI-only desktop smoke error: $(Get-Content -LiteralPath $errorReceipt -Raw)"
+            }
             if ($process.ExitCode -ne 0) { throw "Desktop app exited $($process.ExitCode)." }
             if (-not (Test-Path -LiteralPath $receipt -PathType Leaf)) { throw 'No renderer/gateway smoke receipt.' }
             $result = Get-Content -LiteralPath $receipt -Raw | ConvertFrom-Json
@@ -105,9 +109,10 @@ jobs:
           }
 
       - name: Upload only credential-free desktop dashboard screenshot
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: windows-viewer-dashboard-ci
           path: ${{ runner.temp }}/unboundvnc-viewer-dashboard.png
           retention-days: 1
-          if-no-files-found: error
+          if-no-files-found: warn

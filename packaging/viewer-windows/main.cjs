@@ -88,17 +88,19 @@ if (!app.requestSingleInstanceLock()) {
         `);
         const sessionDeadline = Date.now() + 15_000;
         let sessionReady = false;
+        let lastView = null;
         while (Date.now() < sessionDeadline && !sessionReady) {
           const view = await window.webContents.executeJavaScript(`(() => ({
             status: document.querySelector('#session-status')?.textContent ?? '',
             canvas: Boolean(document.querySelector('#remote-screen canvas')),
             error: document.querySelector('#connection-error-message')?.textContent ?? ''
           }))()`);
+          lastView = view;
           if (view.error) throw new Error(`Synthetic loopback viewer connection failed: ${view.error}`);
           sessionReady = view.status.startsWith('Connected') && view.canvas;
           if (!sessionReady) await new Promise(done => setTimeout(done, 100));
         }
-        if (!sessionReady) throw new Error('Desktop viewer did not negotiate the synthetic RFB session.');
+        if (!sessionReady) throw new Error(`Desktop viewer did not negotiate synthetic RFB: ${JSON.stringify(lastView)}`);
         // Explicit user-visible session disconnect; no screenshot of framebuffer.
         await window.webContents.executeJavaScript("document.querySelector('#session-disconnect').click()");
         await writeFile(join(process.env.RUNNER_TEMP, 'unboundvnc-viewer-desktop-smoke.json'), JSON.stringify({
@@ -108,6 +110,12 @@ if (!app.requestSingleInstanceLock()) {
       }
     } catch (error) {
       console.error('Unable to initialize local viewer:', error.message);
+      if (process.env.UNBOUNDVNC_DESKTOP_CI_SMOKE === '1' &&
+          process.env.GITHUB_ACTIONS === 'true' && process.env.RUNNER_TEMP) {
+        const { writeFile } = require('node:fs/promises');
+        await writeFile(join(process.env.RUNNER_TEMP, 'unboundvnc-viewer-smoke-error.txt'), String(error.message).slice(0, 500));
+        process.exitCode = 1;
+      }
       await stop();
     }
   });
