@@ -171,6 +171,9 @@ function showConnectionFailure(device, message, viewOnly = false) {
   // Retry state is in memory only; saved device profiles never include it.
   state.lastFailure = { device, message, viewOnly };
   renderConnectionError();
+  // The connection form may be below the fold on narrow screens. Put both the
+  // failure and its recovery action in view after the session overlay closes.
+  document.getElementById('connection-retry').focus();
 }
 
 function clearConnectionFailure() {
