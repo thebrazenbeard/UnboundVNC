@@ -6,8 +6,10 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { once } from 'node:events';
-import { readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rmdir, unlink, writeFile } from 'node:fs/promises';
 import { connect, createServer } from 'node:net';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { createGateway } from '../../apps/gateway/src/server.mjs';
 
 const ENABLED = process.env.RFB_X11_SCRAPERS === '1';
@@ -136,6 +138,15 @@ async function startBackend(t, backend) {
     await delay(100);
   }
   assert.ok(painted, `Xvfb did not accept synthetic root colour: ${xvfb.logTail()}`);
+  // RFB scraping servers often composite the *software pointer* into Raw
+  // pixels. XWD omits that pointer. Xvfb starts it at the exact framebuffer
+  // centre (24,16), which caused reproducible cross-server mismatches there.
+  // An original 1x1 fully transparent XBM cursor makes both oracles identical.
+  const cursorDir = await mkdtemp(join(tmpdir(), 'unboundvnc-x11-cursor-'));
+  const cursor = join(cursorDir, 'transparent.xbm');
+  await writeFile(cursor, '#define invisible_width 1\n#define invisible_height 1\nstatic unsigned char invisible_bits[] = { 0x00 };\n',
+    { mode: 0o600, flag: 'wx' });
+  t.after(async () => { await unlink(cursor); await rmdir(cursorDir); });
   const port = await unusedPort();
   let command;
   let args;
@@ -153,10 +164,11 @@ async function startBackend(t, backend) {
   const scraper = launch(t, command, args);
   await awaitPort(port, scraper);
   assert.deepEqual(await listenerAndConnections(port), [], 'RFB readiness probe did not disconnect');
-  // Repaint after the scraper subscribes to the X display and allow its
-  // asynchronous polling/XDamage cycle to settle. `xrefresh` deliberately
-  // flashes an overlay window and can contaminate a screenshot mid-frame.
-  const repaint = spawnSync('xsetroot', ['-display', display, '-solid', '#28914c'],
+  // Repaint with a transparent pointer after the scraper subscribes to the
+  // display. Without this, XWD excludes the central cursor while scrapers
+  // paint it directly into RFB Raw pixels, falsifying the full-frame oracle.
+  const repaint = spawnSync('xsetroot', ['-display', display, '-solid', '#28914c',
+    '-cursor', cursor, cursor],
     { encoding: 'utf8', timeout: 3000 });
   assert.equal(repaint.status, 0, 'Xvfb repaint failed');
   await delay(1200);
