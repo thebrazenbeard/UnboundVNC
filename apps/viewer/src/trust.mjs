@@ -8,9 +8,13 @@ const LOOPBACK_NAME = 'localhost';
 // The preview gateway routes BOTH allowed host spellings to IPv4 127.0.0.1.
 // Bind identity to the actual route, never the user-entered spelling.
 function canonicalEndpoint(endpoint) {
-  return endpoint.startsWith(LOOPBACK_NAME + ':')
-    ? LOOPBACK_IP + endpoint.slice(LOOPBACK_NAME.length)
-    : endpoint;
+  if (typeof endpoint !== 'string' || !endpoint) {
+    throw new Error('Invalid server identity endpoint.');
+  }
+  const normalized = endpoint.toLowerCase(); // DNS hostnames are case-insensitive.
+  return normalized.startsWith(LOOPBACK_NAME + ':')
+    ? LOOPBACK_IP + normalized.slice(LOOPBACK_NAME.length)
+    : normalized;
 }
 
 function legacyLoopbackAlias(endpoint) {
@@ -44,18 +48,20 @@ export function requirePinnedIdentity(pinned, verified) {
 }
 
 export function readServerPin(storage, endpoint) {
+  const canonical = canonicalEndpoint(endpoint);
   const raw = storage.getItem(TRUST_STORAGE_KEY);
   if (raw === null) return null;
   const pins = JSON.parse(raw);
   if (!pins || typeof pins !== 'object' || Array.isArray(pins)) {
     throw new Error('Stored server identities are damaged.');
   }
-  const canonical = canonicalEndpoint(endpoint);
   const alias = legacyLoopbackAlias(canonical);
-  const pin = Object.hasOwn(pins, canonical) ? pins[canonical] : null;
-  const legacy = alias !== null && Object.hasOwn(pins, alias) ? pins[alias] : null;
-  if ((pin !== null && !validFingerprint(pin)) ||
-      (legacy !== null && !validFingerprint(legacy))) {
+  const hasPin = Object.hasOwn(pins, canonical);
+  const hasLegacy = alias !== null && Object.hasOwn(pins, alias);
+  const pin = hasPin ? pins[canonical] : null;
+  const legacy = hasLegacy ? pins[alias] : null;
+  if ((hasPin && !validFingerprint(pin)) ||
+      (hasLegacy && !validFingerprint(legacy))) {
     throw new Error('Stored server identity is invalid.');
   }
   // Existing installations may have separately pinned both spellings. Never
