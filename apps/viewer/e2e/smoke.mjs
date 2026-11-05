@@ -80,20 +80,69 @@ async function run() {
     assert.equal(await page.locator('.device-card').count(), 1);
     assert.match(await page.locator('.device-card h3').textContent(), /Synthetic Test PC/);
 
+    // An everyday directory should retain several independent saved profiles.
+    // These synthetic entries never attempt a real host connection.
+    for (const name of ['Bravo Test PC', 'Charlie Test PC']) {
+      await page.locator('#nav-add').click();
+      await page.locator('#device-form input[name="name"]').fill(name);
+      await page.locator('#device-form input[name="host"]').fill('127.0.0.1');
+      await page.locator('#device-form input[name="port"]').fill('5900');
+      await page.locator('#device-form button[type="submit"]').click();
+    }
+    assert.equal(await page.locator('.device-card').count(), 3);
+
     await page.locator('#device-search').fill('not-present');
     assert.equal(await page.locator('.device-card').count(), 0);
     await page.locator('#device-search').fill('Synthetic');
     assert.equal(await page.locator('.device-card').count(), 1);
     await page.locator('#device-search').fill('');
     await page.reload({ waitUntil: 'networkidle' });
-    assert.equal(await page.locator('.device-card').count(), 1, 'browser-local device profile survives reload');
+    assert.equal(await page.locator('.device-card').count(), 3,
+      'all three browser-local device profiles survive reload');
+    assert.deepEqual(await page.locator('.device-card h3').allTextContents(),
+      ['Bravo Test PC', 'Charlie Test PC', 'Synthetic Test PC']);
     const devices = await page.evaluate(() => localStorage.getItem('unboundvnc.devices.v1'));
     assert.ok(devices && !/password|token/i.test(devices), 'saved devices do not contain credentials');
 
-    const desktopImage = path.join(screenshotDir, 'dashboard-desktop.png');
-    await page.screenshot({ path: desktopImage, fullPage: true });
+    // Keyboard-only directory mutation: after a card is removed, focus should
+    // stay on the corresponding action of the next surviving card, not body.
+    await page.getByRole('button', { name: 'Remove Bravo Test PC' }).focus();
+    page.once('dialog', dialog => dialog.accept());
+    await page.keyboard.press('Enter');
+    assert.equal(await page.locator('.device-card').count(), 2);
+    assert.equal(await page.getByRole('button', { name: 'Remove Charlie Test PC' })
+      .evaluate(element => element === document.activeElement), true,
+    'deleting a saved device must preserve keyboard focus in the surviving directory');
 
-    await page.locator('.device-card [data-action="connect"]').click();
+    // Renaming changes the card's DOM identity/position. Restored focus must
+    // target the replacement Edit action, not a detached dialog trigger.
+    await page.getByRole('button', { name: 'Edit Synthetic Test PC' }).focus();
+    await page.keyboard.press('Enter');
+    await page.locator('#device-form input[name="name"]').fill('Alpha Renamed PC');
+    await page.locator('#device-form button[type="submit"]').click();
+    assert.deepEqual(await page.locator('.device-card h3').allTextContents(),
+      ['Alpha Renamed PC', 'Charlie Test PC']);
+    assert.equal(await page.getByRole('button', { name: 'Edit Alpha Renamed PC' })
+      .evaluate(element => element === document.activeElement), true,
+    'renaming a saved device must restore focus to its replacement Edit button');
+
+    await page.locator('.device-card').first().locator('[data-action="favorite"]').focus();
+    await page.keyboard.press('Enter');
+    assert.equal(await page.getByRole('button', { name: 'Remove from favorites' })
+      .evaluate(element => element === document.activeElement), true,
+    'keyboard favorite toggles should retain focused control after rerender');
+    await writeFile(path.join(screenshotDir, 'directory-result.json'), JSON.stringify({
+      initialProfilesSurvivedReload: 3, afterDeleteAndRename: ['Alpha Renamed PC', 'Charlie Test PC'],
+      keyboardFocusDelete: true, keyboardFocusRename: true, keyboardFocusFavorite: true,
+    }, null, 2));
+
+    const desktopImage = path.join(screenshotDir, 'dashboard-desktop.png');
+    // Card entrance animations stagger by index; capture the settled layout.
+    await page.screenshot({ path: desktopImage, fullPage: true, animations: 'disabled' });
+
+    // The directory now has two saved profiles; target one by its saved name.
+    await page.locator('.device-card').filter({ hasText: 'Alpha Renamed PC' })
+      .locator('[data-action="connect"]').click();
     await page.locator('#connection-error-message').waitFor();
     assert.equal(await page.locator('#connection-error-message').textContent(),
       'Gateway intentionally disabled for UI smoke test');
@@ -104,7 +153,7 @@ async function run() {
     await page.setViewportSize({ width: 390, height: 844 });
     await page.locator('#quick-host').waitFor();
     const mobileImage = path.join(screenshotDir, 'dashboard-mobile.png');
-    await page.screenshot({ path: mobileImage, fullPage: true });
+    await page.screenshot({ path: mobileImage, fullPage: true, animations: 'disabled' });
     assert.equal(browserEvents.filter(event => event.type === 'pageerror').length, 0,
       'viewer has no uncaught browser exceptions');
     succeeded = true;
