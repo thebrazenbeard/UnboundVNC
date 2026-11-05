@@ -181,10 +181,24 @@ internal static class Program
                 // visible on the wire. Cover the *whole* requested frame with
                 // our test-owned opaque window before allowing screen capture.
                 marker.Bounds = new Rectangle(bounds.Left, bounds.Top, frameWidth, frameHeight);
+                marker.BringToFront();
                 marker.Refresh();
                 int[] frameOwnershipMatches = new int[4];
-                bool frameOwned = TestOwnedWindowCoversFrame(marker, bounds, frameWidth,
-                    frameHeight, activePattern, frameOwnershipMatches);
+                int framePaintAttempts = 0;
+                // A WinForms Bounds setter can update ClientSize before DWM
+                // presents the larger surface. The prior 1024px runner still
+                // displayed the OLD 136x80 image: 2720=68*40 TL pixels matched.
+                // Pump our own test window's paint/resize events and only
+                // proceed once the ENTIRE actual on-screen image is ours.
+                bool frameOwned = WaitUntil(() =>
+                {
+                    framePaintAttempts++;
+                    Application.DoEvents();
+                    marker.Invalidate(true);
+                    marker.Update();
+                    return TestOwnedWindowCoversFrame(marker, bounds, frameWidth,
+                        frameHeight, activePattern, frameOwnershipMatches);
+                }, TimeSpan.FromSeconds(4));
                 if (!frameOwned)
                 {
                     // Geometry and color-match counts only, never screen pixels.
@@ -192,8 +206,10 @@ internal static class Program
                     Console.WriteLine($"OWNED_FULL_FRAME_CLIENT_SIZE={marker.ClientSize.Width}x{marker.ClientSize.Height}");
                     Console.WriteLine($"OWNED_FULL_FRAME_ORIGIN_DELTA={origin.X - bounds.Left},{origin.Y - bounds.Top}");
                     Console.WriteLine($"OWNED_FULL_FRAME_QUADRANT_MATCH_COUNTS={string.Join(",", frameOwnershipMatches)}");
+                    Console.WriteLine($"OWNED_FULL_FRAME_PAINT_ATTEMPTS={framePaintAttempts}");
                 }
                 Require(frameOwned, "FULL_FRAME_NOT_OWNED_BY_TEST_WINDOW");
+                Console.WriteLine("OWNED_FULL_FRAME_EVERY_PIXEL=PASS");
                 SendFullFrameUpdateRequest(stream, frameWidth, frameHeight);
                 Require(ReadExact(stream, 4).SequenceEqual(new byte[] { 0, 0, 0, 1 }),
                     "LARGE_UPDATE_HEADER_INVALID");
