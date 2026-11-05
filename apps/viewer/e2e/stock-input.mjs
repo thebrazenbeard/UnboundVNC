@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { connect, createServer as createTcpServer } from 'node:net';
 import { createRequire } from 'node:module';
@@ -53,6 +54,22 @@ function xcommand(binary, args, display) {
     env: { ...process.env, DISPLAY: display } });
   assert.equal(command.status, 0, `${binary} ${args[0]} failed: ${command.stderr ?? command.error?.message}`);
   return command.stdout.trim();
+}
+
+function setDisposableClipboard(display, value) {
+  const result = spawnSync('xclip', ['-selection', 'clipboard', '-in'], {
+    input: value, encoding: 'utf8', timeout: 3000,
+    env: { ...process.env, DISPLAY: display },
+  });
+  assert.equal(result.status, 0, 'test-owned X11 clipboard fixture could not accept text');
+}
+
+function clipboardMatches(display, expected) {
+  const result = spawnSync('xclip', ['-selection', 'clipboard', '-out'], {
+    encoding: 'utf8', timeout: 3000, env: { ...process.env, DISPLAY: display },
+  });
+  // Compare in memory only: never log or upload clipboard contents.
+  return result.status === 0 && result.stdout === expected;
 }
 
 function inputEvents(output) {
@@ -136,10 +153,13 @@ async function run() {
       ? path.resolve(process.env.UNBOUNDVNC_INPUT_SCREENSHOT_DIR)
       : await mkdtemp(path.join(os.tmpdir(), 'unboundvnc-input-'));
     await mkdir(evidenceDir, { recursive: true });
-    context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+    context = await browser.newContext({ viewport: { width: 1280, height: 900 },
+      permissions: ['clipboard-read', 'clipboard-write'] });
     page = await context.newPage();
-    page.on('console', message => browserEvents.push({ type: `console.${message.type()}`, text: message.text() }));
-    page.on('pageerror', error => browserEvents.push({ type: 'pageerror', text: error.message }));
+    // Deliberately omit console/error bodies: clipboard text may appear in an
+    // unexpected browser error, and the uploaded evidence must stay content-free.
+    page.on('console', message => browserEvents.push({ type: `console.${message.type()}` }));
+    page.on('pageerror', error => browserEvents.push({ type: 'pageerror', name: error.name }));
     await page.goto('http://127.0.0.1:5173', { waitUntil: 'networkidle' });
     await page.getByText('Local gateway available').waitFor({ timeout: 10_000 });
     await page.locator('#quick-host').fill('127.0.0.1');
@@ -184,6 +204,49 @@ async function run() {
       const key = events.find(event => event.type === 'key' && event.keysym === 'k');
       return button && key ? { button, key } : false;
     }, 5000);
+
+    // User-visible clipboard is absent in the baseline viewer. This browser
+    // journey must prove both RFB CutText directions against independent X11,
+    // not merely click a control or dispatch a synthetic noVNC event.
+    const clipboardOpen = page.locator('#session-clipboard-open');
+    assert.equal(await clipboardOpen.count(), 1,
+      'connected browser viewer needs a real user-accessible clipboard control');
+    assert.equal(await page.getByRole('button', { name: 'Text clipboard' }).count(), 1,
+      'clipboard toolbar control needs an accessible name even at mobile widths');
+    const browserText = `local-${randomUUID()}`;
+    const remoteText = `remote-${randomUUID()}`;
+    await page.locator('#session-viewonly').click();
+    assert.equal(await clipboardOpen.isDisabled(), true,
+      'viewer view-only must block clipboard exchange');
+    await page.locator('#session-viewonly').click();
+    await clipboardOpen.click();
+    await page.getByRole('dialog', { name: 'Text clipboard' }).waitFor();
+    await page.locator('#session-clipboard-text').fill(browserText);
+    await page.locator('#session-clipboard-send').click();
+    await until(() => clipboardMatches(display, browserText), 7000);
+    assert.equal((await page.locator('#session-clipboard-text').inputValue()).length === 0, true,
+      'sent clipboard text must not remain in the viewer textarea');
+    await page.locator('#session-clipboard-close').click();
+
+    setDisposableClipboard(display, remoteText);
+    await clipboardOpen.click();
+    await until(async () => !await page.locator('#session-clipboard-copy').isDisabled(), 7000);
+    await page.locator('#session-clipboard-copy').click();
+    assert.equal(await page.evaluate(async () => (await navigator.clipboard.readText()).length > 0), true,
+      'browser clipboard should contain copied remote text');
+    const actualMatches = await page.evaluate(async expected =>
+      (await navigator.clipboard.readText()) === expected, remoteText);
+    assert.equal(actualMatches, true,
+      'stock Xtigervnc clipboard event must reach actual browser clipboard');
+    await page.locator('#session-clipboard-close').click();
+    assert.equal(JSON.stringify(browserEvents).includes(browserText) ||
+      JSON.stringify(browserEvents).includes(remoteText), false,
+    'browser event evidence must never contain clipboard values');
+    await page.setViewportSize({ width: 390, height: 844 });
+    await clipboardOpen.click();
+    await page.screenshot({ path: path.join(evidenceDir, 'clipboard-dialog-mobile.png') });
+    await page.locator('#session-clipboard-close').click();
+    await page.setViewportSize({ width: 1280, height: 900 });
     assert.equal(browserEvents.filter(event => event.type === 'pageerror').length, 0);
     await page.waitForFunction(() => document.querySelectorAll('#toasts .toast').length === 0,
       null, { timeout: 7000 });
@@ -193,13 +256,21 @@ async function run() {
       security: 'RFB None; IPv4 loopback only', browser: browser.version(),
       remoteSize: { width: WIDTH, height: HEIGHT }, expectedClickRoot: CENTER,
       viewOnlySuppressed: true, delivered,
+      clipboard: { viewOnlyBlocked: true, browserToX11: true, x11ToBrowser: true,
+        valuesPersistedInEvidence: false },
       evidenceClass: 'real Chromium→noVNC→UnboundVNC gateway→stock Xtigervnc→X11 event',
     }, null, 2));
     await page.locator('#session-disconnect').click();
+    assert.equal((await page.locator('#session-clipboard-text').inputValue()).length === 0, true,
+      'disconnect must clear clipboard textarea');
+    assert.equal(await page.locator('#session-clipboard-copy').isDisabled(), true,
+      'disconnect must clear pending remote clipboard text');
     success = true;
     console.log(`PASS independent X11 button/key events ${JSON.stringify(delivered)} browser=${browser.version()}`);
   } finally {
     if (!success && page && evidenceDir && !page.isClosed()) {
+      // A failed clipboard assertion must never upload typed clipboard text.
+      await page.locator('#session-clipboard-text').evaluate(node => { node.value = ''; }).catch(() => {});
       await page.screenshot({ path: path.join(evidenceDir, 'failure.png') }).catch(() => {});
       await writeFile(path.join(evidenceDir, 'failure-witness-events.json'),
         JSON.stringify(inputEvents(witnessLog), null, 2)).catch(() => {});
