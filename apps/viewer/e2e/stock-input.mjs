@@ -185,7 +185,8 @@ async function run() {
       return button && key ? { button, key } : false;
     }, 5000);
     assert.equal(browserEvents.filter(event => event.type === 'pageerror').length, 0);
-    await page.locator('#toasts .toast').waitFor({ state: 'hidden', timeout: 7000 });
+    await page.waitForFunction(() => document.querySelectorAll('#toasts .toast').length === 0,
+      null, { timeout: 7000 });
     await page.screenshot({ path: path.join(evidenceDir, 'input-witness-session.png') });
     await writeFile(path.join(evidenceDir, 'x11-input-result.json'), JSON.stringify({
       outcome: 'PASS', fixture: 'test-owned Xtigervnc X11 window observed by stock xev',
