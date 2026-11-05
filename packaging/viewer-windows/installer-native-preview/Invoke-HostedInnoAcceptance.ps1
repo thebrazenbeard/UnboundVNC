@@ -299,6 +299,47 @@ try {
     Remove-Item -LiteralPath $nativeTarget -Recurse -Force
   }
 
+  # Inno's unins000.dat is its own deletion-plan log, not an application file.
+  # It is allowed by the native tree inventory but has no compile-time hash.
+  # Exercise the actual native uninstaller on a modified/truncated/missing log;
+  # each refusal must preserve all app hashes and the non-owned sibling.
+  # Keep the pristine bytes outside {app} and restore after every negative.
+  $uninstallDat=Join-Path $install 'unins000.dat'
+  if(-not (Test-Path -LiteralPath $uninstallDat -PathType Leaf)) { throw 'Inno deletion-plan log is missing before native tamper tests.' }
+  $uninstallDatBackup=Join-Path $root 'pristine-unins000.dat.test-backup'
+  Copy-Item -LiteralPath $uninstallDat -Destination $uninstallDatBackup
+  $datHash=(Get-FileHash -LiteralPath $uninstallDatBackup -Algorithm SHA256).Hash
+  $datBytes=[IO.File]::ReadAllBytes($uninstallDatBackup)
+  if($datBytes.Length -lt 128) { throw 'Inno deletion-plan log unexpectedly too short to falsify safely.' }
+  $datCases=@('modified deletion-plan byte','truncated deletion-plan','missing deletion-plan')
+  foreach($datCase in $datCases) {
+    try {
+      if($datCase -eq 'modified deletion-plan byte') {
+        $mutated=[byte[]]$datBytes.Clone()
+        $offset=[int][Math]::Floor($mutated.Length / 2)
+        $mutated[$offset]=[byte]($mutated[$offset] -bxor 0xFF)
+        [IO.File]::WriteAllBytes($uninstallDat,$mutated)
+      } elseif($datCase -eq 'truncated deletion-plan') {
+        [IO.File]::WriteAllBytes($uninstallDat,[byte[]]$datBytes[0..63])
+      } else {
+        Move-Item -LiteralPath $uninstallDat -Destination (Join-Path $root 'missing-unins000.dat.test-backup')
+      }
+      Assert-NativeUninstallRefusal $datCase $before $uninstaller $decoy $decoyHash
+    } finally {
+      if(Test-Path -LiteralPath $install -PathType Container) {
+        Copy-Item -LiteralPath $uninstallDatBackup -Destination $uninstallDat -Force
+      }
+      $movedDat=Join-Path $root 'missing-unins000.dat.test-backup'
+      if(Test-Path -LiteralPath $movedDat -PathType Leaf) { Remove-Item -LiteralPath $movedDat }
+    }
+    if(-not (Test-Path -LiteralPath $uninstallDat -PathType Leaf) -or
+        (Get-FileHash -LiteralPath $uninstallDat -Algorithm SHA256).Hash -cne $datHash) {
+      throw "Native deletion-plan log restoration failed after $datCase."
+    }
+    $null=Assert-InstallOwned $before
+    Write-Host "NATIVE DELETION-PLAN RESTORE PASS ($datCase): pristine unins000.dat SHA256 restored."
+  }
+
   $uninstaller=Assert-InstallOwned $before
   $nativeExit=Invoke-NativeUninstallerBounded $uninstaller 'clean expected uninstall'
   if($nativeExit -ne 0) { throw "Native Inno uninstaller returned $nativeExit." }
