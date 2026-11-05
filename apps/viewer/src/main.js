@@ -1,6 +1,7 @@
 import RFB from '@novnc/novnc';
 import { describeEndpoint, loadDevices, saveDevices, sortedDevices, validateDevice } from './devices.mjs';
 import { fingerprintServerKey } from './identity.mjs';
+import { compareServerPin, forgetServerPin, readServerPin, rememberServerPin, trustedEndpoint } from './trust.mjs';
 import './style.css';
 
 const app = document.querySelector('#app');
@@ -96,13 +97,13 @@ app.innerHTML = `
     <div id="device-form-error" class="form-error" role="alert" hidden></div>
     <div class="modal-footer"><button class="btn btn-quiet" type="button" data-close="device-dialog">Cancel</button><button class="btn btn-primary" type="submit">Save device</button></div>
   </form></dialog>
-  <dialog id="credentials-dialog" class="modal"><form id="credentials-form" method="dialog"><div class="modal-header"><div><p class="section-kicker">SECURE CONNECTION</p><h2>Credentials required</h2></div></div>
-    <p class="modal-hint">The VNC server requested credentials. They are used for this session only.</p><label>Username <input name="username" autocomplete="username" placeholder="If required"/></label><label>Password <input name="password" type="password" autocomplete="off" autofocus placeholder="VNC password"/></label>
+  <dialog id="credentials-dialog" class="modal" aria-labelledby="credentials-title"><form id="credentials-form" method="dialog"><div class="modal-header"><div><p class="section-kicker">VNC AUTHENTICATION</p><h2 id="credentials-title">Credentials required</h2></div></div>
+    <p class="modal-hint">The VNC server requested credentials. They are used for this session only. A VNC password does not establish encrypted transport or server identity; the gateway-to-host connection may be unencrypted.</p><label>Username <input name="username" autocomplete="username" placeholder="If required"/></label><label>Password <input name="password" type="password" autocomplete="off" autofocus placeholder="VNC password"/></label>
     <div class="modal-footer"><button id="credentials-cancel" class="btn btn-quiet" type="button">Disconnect</button><button class="btn btn-primary" type="submit">Authenticate ${glyph.arrow}</button></div>
   </form></dialog>
-  <dialog id="identity-dialog" class="modal"><div class="modal-header"><div><p class="section-kicker">VERIFY YOUR DESTINATION</p><h2>Confirm server identity</h2></div></div><p id="identity-detail" class="modal-hint">Compare this key fingerprint with one obtained through a trusted, separate channel. Do not approve an unknown or changed fingerprint.</p>
-    <p class="modal-hint">SHA-256 server key fingerprint:</p><code id="identity-fingerprint" class="identity-fingerprint">Calculating…</code>
-    <div class="modal-footer"><button class="btn btn-quiet" id="identity-reject" type="button">Disconnect</button><button class="btn btn-primary" id="identity-approve" type="button" disabled>I verified this key</button></div></dialog>
+  <dialog id="identity-dialog" class="modal" aria-labelledby="identity-title"><div class="modal-header"><div><p class="section-kicker">VERIFY YOUR DESTINATION</p><h2 id="identity-title">Confirm server identity</h2></div></div><p id="identity-detail" class="modal-hint">Compare this key fingerprint with one obtained through a trusted, separate channel. Do not approve an unknown or changed fingerprint.</p>
+    <p class="modal-hint">SHA-256 server key fingerprint:</p><code id="identity-fingerprint" class="identity-fingerprint" aria-live="polite">Calculating…</code>
+    <div class="modal-footer"><button class="btn btn-quiet" id="identity-reject" type="button">Disconnect</button><button class="btn btn-quiet" id="identity-reset" type="button" hidden>Forget old key and disconnect</button><button class="btn btn-primary" id="identity-approve" type="button" disabled>I verified this key</button></div></dialog>
   <div id="toasts" class="toast-stack" aria-live="polite"></div>
 `;
 
@@ -167,6 +168,8 @@ function hideSession() {
   closeDialog('credentials-dialog');
   closeDialog('identity-dialog');
   document.querySelector('#identity-approve').disabled = true;
+  document.querySelector('#identity-approve').hidden = false;
+  document.querySelector('#identity-reset').hidden = true;
   document.querySelector('#identity-fingerprint').textContent = 'Calculating…';
 }
 
@@ -186,7 +189,10 @@ async function connectTo(device) {
   try { target = validateDevice(device); }
   catch (error) { notify(error.message, 'error'); return; }
   showSession(target);
-  const connection = { device, rfb: null, manual: false, abortController: new AbortController(), verificationReady: false };
+  const connection = {
+    device, target, rfb: null, manual: false, abortController: new AbortController(),
+    verificationReady: false, pendingFingerprint: null, identityChanged: false, verificationAttempt: 0,
+  };
   state.connection = connection;
   try {
     const response = await fetch('/api/sessions', {
@@ -220,20 +226,38 @@ async function connectTo(device) {
     });
     rfb.addEventListener('serververification', async event => {
       if (state.connection !== connection) return;
+      const attempt = ++connection.verificationAttempt;
       connection.verificationReady = false;
+      connection.pendingFingerprint = null;
+      connection.identityChanged = false;
       document.querySelector('#identity-approve').disabled = true;
+      document.querySelector('#identity-approve').hidden = false;
+      document.querySelector('#identity-reset').hidden = true;
       document.querySelector('#identity-fingerprint').textContent = 'Calculating…';
-      document.querySelector('#identity-detail').textContent = `The remote server requested ${event.detail?.type || 'unknown'} key verification. Compare its fingerprint against a value obtained independently from the server owner. A VNC password does not prove server identity.`;
-      document.querySelector('#identity-dialog').showModal();
       try {
         if (event.detail?.type !== 'RSA') throw new Error('Unsupported server verification method.');
         const fingerprint = await fingerprintServerKey(event.detail.publickey);
-        if (state.connection !== connection) return;
+        if (state.connection !== connection || connection.verificationAttempt !== attempt) return;
+        const endpoint = trustedEndpoint(target);
+        const decision = compareServerPin(readServerPin(window.localStorage, endpoint), fingerprint);
+        // No user interaction is required for a key already independently verified.
+        if (decision === 'matching') {
+          rfb.approveServer();
+          return;
+        }
+        connection.pendingFingerprint = fingerprint;
+        connection.identityChanged = decision === 'changed';
         document.querySelector('#identity-fingerprint').textContent = fingerprint;
-        connection.verificationReady = true;
-        document.querySelector('#identity-approve').disabled = false;
+        document.querySelector('#identity-detail').textContent = connection.identityChanged
+          ? `WARNING: The RSA server key for ${endpoint} differs from the previously trusted key. This connection is blocked. If the owner confirms a legitimate key rotation through another channel, forget the old key, disconnect, then reconnect and verify the new fingerprint.`
+          : `First connection to ${endpoint}: compare this RSA fingerprint against one obtained independently from the server owner. Only approve if they match. A VNC password does not prove server identity.`;
+        connection.verificationReady = !connection.identityChanged;
+        document.querySelector('#identity-approve').disabled = connection.identityChanged;
+        document.querySelector('#identity-approve').hidden = connection.identityChanged;
+        document.querySelector('#identity-reset').hidden = !connection.identityChanged;
+        document.querySelector('#identity-dialog').showModal();
       } catch (error) {
-        if (state.connection !== connection) return;
+        if (state.connection !== connection || connection.verificationAttempt !== attempt) return;
         disconnect();
         notify(`Could not verify server identity: ${error.message}`, 'error');
       }
@@ -348,10 +372,33 @@ for (const id of ['credentials-dialog', 'identity-dialog']) {
   });
 }
 document.getElementById('identity-approve').addEventListener('click', () => {
-  if (!state.connection?.verificationReady) return;
-  state.connection.verificationReady = false;
+  const connection = state.connection;
+  if (!connection?.verificationReady || connection.identityChanged || !connection.pendingFingerprint) return;
+  connection.verificationReady = false;
+  try {
+    rememberServerPin(window.localStorage, trustedEndpoint(connection.target), connection.pendingFingerprint);
+  } catch (error) {
+    // A storage failure may be a concurrent change to an existing pin. Do not
+    // allow a successful user click to bypass an unresolved mismatch.
+    disconnect();
+    notify(`Cannot establish remembered server identity: ${error.message}`, 'error');
+    return;
+  }
   closeDialog('identity-dialog');
-  state.connection?.rfb?.approveServer();
+  connection.rfb?.approveServer();
+});
+document.getElementById('identity-reset').addEventListener('click', () => {
+  const connection = state.connection;
+  if (!connection?.identityChanged) return;
+  const endpoint = trustedEndpoint(connection.target);
+  if (!window.confirm(`Forget the previously trusted RSA key for ${endpoint}? This does not prove that the new key is safe. The session will disconnect and you must independently verify it on the next connection.`)) return;
+  try {
+    forgetServerPin(window.localStorage, endpoint);
+    disconnect();
+    notify('Old server key forgotten. Reconnect and verify the new key with the owner.');
+  } catch (error) {
+    notify(`Could not forget server key: ${error.message}`, 'error');
+  }
 });
 
 async function checkGateway() {
