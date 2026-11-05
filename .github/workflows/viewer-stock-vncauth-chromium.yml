@@ -1,0 +1,52 @@
+name: Stock TigerVNC VncAuth Chromium (loopback)
+
+on:
+  pull_request:
+    paths:
+      - 'apps/viewer/**'
+      - 'apps/gateway/src/server.mjs'
+      - '.github/workflows/viewer-stock-vncauth-chromium.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  stock-vncauth-browser:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: apps/viewer
+    env:
+      UNBOUNDVNC_VNCAUTH_SCREENSHOT_DIR: ${{ github.workspace }}/artifacts/stock-vncauth-chromium
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: apps/viewer/package-lock.json
+      - name: Install independent TigerVNC and X11 tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends tigervnc-standalone-server tigervnc-tools x11-xserver-utils
+          command -v tigervncpasswd
+          command -v Xtigervnc
+      - name: Install viewer and test-only Chromium
+        run: |
+          npm ci
+          npm install --no-save --package-lock=false --ignore-scripts playwright@1.56.1
+          npx playwright install chromium
+      - name: Verify correct and wrong VncAuth in noVNC Chromium UI
+        run: node e2e/stock-vncauth.mjs
+      - name: Upload credential-free auth UI evidence on success or failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stock-vncauth-chromium-evidence
+          path: artifacts/stock-vncauth-chromium/
+          if-no-files-found: warn
+          retention-days: 7
