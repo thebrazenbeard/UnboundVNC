@@ -110,3 +110,30 @@ those files is **RED** even if the attacker-supplied plan itself has a valid
 engine CRC. This is deliberate test-owned data loss only, never a release
 feature, and does not authorize a real-user installer or hostile log parsing
 outside the disposable runner root.
+
+### Same-install-root valid log substitution (separate follow-up experiment)
+
+A different-root log may be refused because its recorded setup location does
+not match the original. To isolate that confounder, an additional **CI-only**
+fixture compiles a third unsigned Inno setup with the *identical* AppId and
+the *identical* original installation path, plus the same single synthetic
+decoy deletion. Only after the original app's entire installed file inventory
+passes SHA256 and exclusive-read checks is its folder **renamed intact** into
+a sibling backup under the same test-owned GUID root. The probe setup may now
+run at the vacated exact path. Its actual uninstaller must positively delete
+the probe app and the synthetic decoy. The original app is always restored in
+a `finally` block from the complete, verified backup, never overwritten by
+probe remnants. Any remnants are moved intact into a fresh in-root quarantine
+before original restoration, and an ambiguous probe owner marker fails the
+test. All 73 app hashes, owner marker, native metadata hashes and reparse
+boundaries are checked after restoration.
+
+Only then is the Inno-generated valid **same-root** probe log substituted for
+the original app's log. The original native uninstaller must return a nonzero
+refusal **and** preserve every installed payload hash and the non-owned decoy;
+the pristine original log is restored afterward. A failure of the positive
+control is a fixture failure, **not** exploit evidence. If the original
+uninstaller changes the app/decoy after accepting the same-root probe log,
+that is a substantive test-owned **RED**. The test does not exercise arbitrary
+binary log forgery or prove an integrity/TOCTOU boundary against same-user
+malicious writes; no real machine, external path or binary release is in scope.
