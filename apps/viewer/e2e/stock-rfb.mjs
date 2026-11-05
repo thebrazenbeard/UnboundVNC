@@ -15,6 +15,7 @@ const COLOR = '#28914c';
 const RGB = [0x28, 0x91, 0x4c];
 const RFB_WIDTH = 480;
 const RFB_HEIGHT = 320;
+const RECONNECTED_RGB = [0xab, 0x45, 0x67];
 
 async function vacantPort() {
   const server = createTcpServer();
@@ -64,6 +65,34 @@ async function stopTiger(child) {
     new Promise(resolve => setTimeout(resolve, 2000)),
   ]);
   if (child.exitCode === null) child.kill('SIGKILL');
+}
+
+async function waitForMetrics(page, predicate, label) {
+  const handle = await page.waitForFunction(check => {
+    const canvas = document.querySelector('#remote-screen canvas');
+    const stage = document.querySelector('#session-stage');
+    if (!canvas || !stage) return false;
+    const rect = canvas.getBoundingClientRect();
+    const bounds = stage.getBoundingClientRect();
+    const m = { width: canvas.width, height: canvas.height,
+      renderedWidth: rect.width, renderedHeight: rect.height,
+      stageWidth: bounds.width, stageHeight: bounds.height };
+    const good = check === 'desktop-fit'
+      ? m.width === 480 && m.height === 320 && m.renderedWidth > 480 && m.renderedHeight > 320
+      : check === 'unscaled'
+        ? Math.abs(m.renderedWidth - 480) < 2 && Math.abs(m.renderedHeight - 320) < 2
+        : check === 'mobile-fit'
+          ? m.width === 480 && m.height === 320 && m.renderedWidth <= 391
+            && m.renderedHeight <= m.stageHeight + 1 && m.renderedWidth < 480
+          : check === 'reconnected'
+            ? m.width === 640 && m.height === 360 && m.renderedWidth <= m.stageWidth + 1
+              && m.renderedHeight <= m.stageHeight + 1
+            : false;
+    return good ? m : false;
+  }, predicate, { timeout: 10_000 });
+  const value = await handle.jsonValue();
+  assert.ok(value, `${label} canvas dimensions missing`);
+  return value;
 }
 
 async function run() {
@@ -151,18 +180,85 @@ async function run() {
     assert.equal(browserEvents.filter(event => event.type === 'pageerror').length, 0,
       'no uncaught errors during real stock RFB browser render');
 
+    // Genuine CSS canvas geometry, not just raw RFB framebuffer dimensions.
+    const desktopFit = await waitForMetrics(page, 'desktop-fit', 'initial fit');
+    await page.locator('#session-scale').click();
+    assert.equal(await page.locator('#session-scale').getAttribute('aria-pressed'), 'false');
+    const unscaled = await waitForMetrics(page, 'unscaled', '1:1 scaling');
+    await page.locator('#session-scale').click();
+    assert.equal(await page.locator('#session-scale').getAttribute('aria-pressed'), 'true');
+    await waitForMetrics(page, 'desktop-fit', 'restored fit');
+
+    // At mobile widths the text span inside toolbar buttons is display:none.
+    // A nameless Fit screen button is a real accessibility/resize defect.
+    await page.setViewportSize({ width: 390, height: 844 });
+    const mobileFit = await waitForMetrics(page, 'mobile-fit', 'responsive fit');
+    assert.equal(await page.getByRole('button', { name: 'Fit screen' }).isVisible(), true,
+      'Fit screen must retain an accessible button name when text is hidden on mobile');
+    assert.equal(await page.locator('#session-viewonly').getAttribute('aria-pressed'), 'false',
+      'scaling and viewport resize must not switch input into view-only');
+
     // A fixed session view must be captured at viewport size; fullPage would
     // stitch dashboard content outside the visible remote-session viewport.
-    await page.locator('#toasts .toast').waitFor({ state: 'hidden', timeout: 7_000 });
+    await page.waitForFunction(() => document.querySelectorAll('#toasts .toast').length === 0,
+      null, { timeout: 7_000 });
     await page.screenshot({ path: path.join(evidenceDir, 'stock-rfb-session.png') });
     await writeFile(path.join(evidenceDir, 'framebuffer-pixel.json'),
       JSON.stringify({ fixture: 'stock Ubuntu Xtigervnc X11 root', rfbSecurity: 'None (loopback only)',
         expectedRgb: RGB, ...framebuffer, browser: browser.version() }, null, 2));
+
+    // An abrupt server disappearance should restore the dashboard's retry UI.
+    // Reconnect is a new session and never reuses a VNC password.
+    await stopTiger(tiger);
+    await page.locator('#connection-error').waitFor({ state: 'visible', timeout: 15_000 });
+    assert.match(await page.locator('#connection-error-message').textContent(), /Remote connection ended unexpectedly/);
+    assert.equal(await page.locator('#session-view').isVisible(), false);
+
+    const secondDisplay = `:${191 + (process.pid % 60)}`;
+    tiger = spawn('Xtigervnc', [secondDisplay, '-geometry', '640x360', '-depth', '24',
+      '-rfbport', String(rfbPort), '-SecurityTypes', 'None', '-localhost', 'yes',
+      '-interface', '127.0.0.1', '-nolisten', 'tcp', '-ac'],
+    { stdio: ['ignore', 'pipe', 'pipe'] });
+    tiger.on('error', error => { tigerLog += `\n${error.message}`; });
+    for (const stream of [tiger.stdout, tiger.stderr]) {
+      stream.on('data', bytes => { tigerLog = (tigerLog + bytes.toString()).slice(-8_000); });
+    }
+    await waitForPort(rfbPort, tiger, () => tigerLog);
+    await assertLoopbackRfb(rfbPort);
+    const secondPaint = spawnSync('xsetroot', ['-display', secondDisplay, '-solid', '#ab4567'],
+      { encoding: 'utf8', timeout: 3000 });
+    assert.equal(secondPaint.status, 0, `replacement X11 screen paint failed: ${secondPaint.stderr}`);
+    await page.locator('#connection-retry').click();
+    await page.getByText('Connected · identity unverified').waitFor({ timeout: 15_000 });
+    const mobileReconnected = await waitForMetrics(page, 'reconnected', 'retried 640x360');
+    const secondPixel = await page.waitForFunction(expected => {
+      const canvas = document.querySelector('#remote-screen canvas');
+      if (!canvas || canvas.width !== 640 || canvas.height !== 360) return false;
+      const pixel = canvas.getContext('2d')?.getImageData(320, 180, 1, 1)?.data;
+      if (!pixel) return false;
+      return Array.from(pixel.subarray(0, 3)).every((value, i) => value === expected[i]);
+    }, RECONNECTED_RGB, { timeout: 15_000 });
+    assert.ok(await secondPixel.jsonValue(), 'replacement independent framebuffer color missing');
+    assert.equal(await page.locator('#session-viewonly').getAttribute('aria-pressed'), 'false');
+    assert.equal(await page.locator('#session-scale').getAttribute('aria-pressed'), 'true');
+    assert.equal(await page.locator('#credentials-dialog').isVisible(), false);
+    assert.equal(await page.evaluate(() => /password|credentials|token/i.test(JSON.stringify(localStorage))), false);
+    await page.waitForFunction(() => document.querySelectorAll('#toasts .toast').length === 0,
+      null, { timeout: 7_000 });
+    await page.screenshot({ path: path.join(evidenceDir, 'stock-rfb-reconnected-mobile.png') });
+    await writeFile(path.join(evidenceDir, 'resize-reconnect-result.json'), JSON.stringify({
+      outcome: 'PASS', browser: browser.version(), desktopFit, unscaled, mobileFit,
+      mobileReconnected, originalScreen: { width: 480, height: 320, rgb: RGB },
+      replacementScreen: { width: 640, height: 360, rgb: RECONNECTED_RGB },
+      unexpectedDisconnectBanner: true, retryConnected: true,
+      noCredentialReuse: true, viewOnlyPreserved: true,
+    }, null, 2));
     await page.locator('#session-disconnect').click();
     assert.equal(await page.locator('#session-view').isVisible(), false, 'disconnect returns to dashboard');
     succeeded = true;
     console.log(JSON.stringify({ outcome: 'PASS', browser: browser.version(), gatewayOrigin,
-      rfbPort, framebuffer, screenshot: path.join(evidenceDir, 'stock-rfb-session.png') }));
+      rfbPort, framebuffer, desktopFit, mobileFit, mobileReconnected,
+      screenshot: path.join(evidenceDir, 'stock-rfb-reconnected-mobile.png') }));
   } finally {
     if (!succeeded && page && evidenceDir && !page.isClosed()) {
       await page.screenshot({ path: path.join(evidenceDir, 'failure.png'), fullPage: true }).catch(() => {});
