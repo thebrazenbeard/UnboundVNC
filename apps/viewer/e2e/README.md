@@ -62,6 +62,14 @@ noVNC can report `clean: true` on a server-initiated socket close; that is
 shows the retry banner, whereas the explicit Disconnect button does not.
 No automatic reconnection, host access or encrypted transport is implied.
 
+The same real browser test also checks a **session-safety preference**: if the
+user deliberately enabled local View only before an unexpected stock server
+shutdown, the *same-endpoint Retry* retains that setting when noVNC reconnects.
+An explicitly fresh Quick Connect continues to start in normal input mode.
+The remembered flag lives only in the active connection/Retry state in memory,
+not saved browser profiles or credentials. It does **not** grant or enforce
+host-side authorization: the remote host must enforce that separately.
+
 The stock-RFB browser test also records real Playwright accessible-name
 snapshots for the connected **View only**, **Fullscreen** and **Disconnect**
 buttons before/after its 390px viewport resize, uploaded as
