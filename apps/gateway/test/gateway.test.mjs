@@ -96,6 +96,26 @@ async function postWithHost(f, host) {
   });
 }
 
+async function observeStableBackpressure(sample, { windows = 4, windowMs = 200, maxWindowFeed = 128 * 1024, maxQueue = 512 * 1024 } = {}) {
+  const start = sample();
+  let previous = start;
+  let peakQueue = start.queue;
+  let maxFeed = 0;
+  for (let i = 0; i < windows; i++) {
+    await new Promise(resolve => setTimeout(resolve, windowMs));
+    const current = sample();
+    const feed = current.offered - previous.offered;
+    peakQueue = Math.max(peakQueue, current.queue);
+    maxFeed = Math.max(maxFeed, feed);
+    assert.equal(current.closed, false, `stalled connection closed before heartbeat window ${i + 1}`);
+    assert.equal(current.blocked, true, `upstream TCP backpressure disappeared in window ${i + 1}`);
+    assert.ok(current.queue > 0 && current.queue <= maxQueue, `WebSocket queue escaped bound in window ${i + 1}: ${current.queue}B`);
+    assert.ok(feed <= maxWindowFeed, `upstream continued flooding after settled stall in window ${i + 1}: ${feed}B`);
+    previous = current;
+  }
+  return { postPlateauFeed: previous.offered - start.offered, maxWindowFeed: maxFeed, peakQueue };
+}
+
 test('health is local and no remote support is advertised', async t => {
   const f = await fixture(t);
   const res = await fetch(`${f.url}/api/health`);
@@ -680,6 +700,21 @@ test('sustained RFB traffic can exceed 64 MiB without lifetime-byte disconnect',
   assert.equal(connected.socket.destroyed, false);
 });
 
+test('a delayed producer restart fails the slow-reader post-plateau oracle', async () => {
+  const CHUNK = 64 * 1024;
+  let offered = 0;
+  let reads = 0;
+  // Two complete quiet windows, then an injected window-three restart.
+  // Drive the injection by sample count, not a flaky event-loop timer.
+  await assert.rejects(
+    observeStableBackpressure(() => {
+      if (++reads === 4) offered += CHUNK * 3;
+      return { offered, blocked: true, queue: CHUNK + 10, closed: false };
+    }),
+    /upstream continued flooding after settled stall in window 3/,
+  );
+});
+
 test('a browser that never reads propagates bounded outbound backpressure and times out', async t => {
   const CHUNK = 64 * 1024;
   const MAX_OFFERED = 96 * 1024 * 1024;
@@ -729,16 +764,42 @@ test('a browser that never reads propagates bounded outbound backpressure and ti
   }
   assert.ok(ws.writableLength > 0, `WebSocket never backpressured; offered=${offered}`);
   assert.equal(producerBlocked, true, 'upstream writer did not experience propagated TCP backpressure');
-  const pausedAt = offered;
-  const queueAt = ws.writableLength;
-  await new Promise(resolve => setTimeout(resolve, 200));
-  const queueAfter = ws.writableLength;
-  const offeredDelta = offered - pausedAt;
-  const rssGrowth = process.memoryUsage().rss - initialRss;
-  t.diagnostic(`slow-reader: offered=${offered}B; after-stall-feed=${offeredDelta}B; wsQueue=${queueAt}/${queueAfter}B; rssGrowth=${rssGrowth}B`);
-  assert.ok(offeredDelta <= CHUNK * 2, `upstream continued flooding after stall: ${offeredDelta}B`);
-  assert.ok(queueAfter <= CHUNK * 8, `unbounded WebSocket writable queue: ${queueAfter}B`);
-  assert.ok(rssGrowth < 32 * 1024 * 1024, `unbounded RSS growth: ${rssGrowth}B`);
+  // The first blocked write precedes TCP receive-window exhaustion: the
+  // kernel can still drain in-flight bytes for a short period. Measure a
+  // genuine plateau before applying the original strict 128KiB/200ms bound.
+  // Never accept a producer that simply reaches its fixture's 96MiB ceiling.
+  const settleStarted = Date.now();
+  let unchangedSince = settleStarted;
+  let lastOffered = offered;
+  let peakQueue = ws.writableLength;
+  let peakRssGrowth = 0;
+  const sample = () => {
+    peakQueue = Math.max(peakQueue, ws.writableLength);
+    peakRssGrowth = Math.max(peakRssGrowth, process.memoryUsage().rss - initialRss);
+    return { offered, blocked: producerBlocked, queue: ws.writableLength, closed: ws.destroyed || upstream.destroyed };
+  };
+  let plateau = false;
+  while (Date.now() - settleStarted < 1800) {
+    await new Promise(resolve => setTimeout(resolve, 25));
+    const current = sample();
+    assert.ok(current.queue <= CHUNK * 8, `unbounded WebSocket writable queue during settling: ${current.queue}B`);
+    assert.ok(peakRssGrowth < 32 * 1024 * 1024, `unbounded RSS growth during settling: ${peakRssGrowth}B`);
+    assert.ok(current.offered <= 16 * 1024 * 1024, `upstream accepted too much before backpressure: ${current.offered}B`);
+    assert.equal(current.closed, false, 'socket closed before a sustained slow-reader plateau');
+    if (current.offered !== lastOffered || !current.blocked || current.queue === 0) {
+      unchangedSince = Date.now();
+      lastOffered = current.offered;
+    }
+    if (current.blocked && current.queue > 0 && Date.now() - unchangedSince >= 400) {
+      plateau = true;
+      break;
+    }
+  }
+  assert.ok(plateau, `upstream never reached a stable TCP backpressure plateau; offered=${offered}B wsQueue=${ws.writableLength}B`);
+  const stableAt = offered;
+  const observed = await observeStableBackpressure(sample, { maxWindowFeed: CHUNK * 2, maxQueue: CHUNK * 8 });
+  assert.ok(peakRssGrowth < 32 * 1024 * 1024, `unbounded RSS growth: ${peakRssGrowth}B`);
+  t.diagnostic(`slow-reader: offered=${offered}B; plateauAt=${stableAt}B; post-plateau-feed=${observed.postPlateauFeed}B; max-200ms-feed=${observed.maxWindowFeed}B; peakWsQueue=${peakQueue}B; peakRssGrowth=${peakRssGrowth}B`);
   function waitForClose(socket) {
     if (socket.destroyed) return Promise.resolve();
     return new Promise((resolve, reject) => {
