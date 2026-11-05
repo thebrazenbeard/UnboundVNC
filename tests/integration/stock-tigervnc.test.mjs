@@ -55,14 +55,18 @@ async function assertLoopbackListener(port) {
     'RFB listener on non-loopback IPv6 interface');
 }
 
-async function waitForRfbSessionRelease(port) {
+async function waitForRfbEstablishedCount(port, expected) {
   const deadline = Date.now() + TIMEOUT_MS;
   while (Date.now() < deadline) {
     const established = await establishedRfbEndpoints(port);
-    if (established.length === 0) return;
+    if (established.length === expected) return established;
     await new Promise(resolve => setTimeout(resolve, 100));
   }
-  throw new Error(`RFB TCP session remained ESTABLISHED after downstream disconnect: ${JSON.stringify(await establishedRfbEndpoints(port))}`);
+  throw new Error(`expected ${expected} ESTABLISHED RFB TCP endpoints; observed ${JSON.stringify(await establishedRfbEndpoints(port))}`);
+}
+
+async function waitForRfbSessionRelease(port) {
+  await waitForRfbEstablishedCount(port, 0);
 }
 
 async function establishedRfbEndpoints(port) {
@@ -79,7 +83,7 @@ async function establishedRfbEndpoints(port) {
     }));
 }
 
-async function startTiger(t, { securityType = 'None', passwordFile = null } = {}) {
+async function startTiger(t, { securityType = 'None', passwordFile = null, alwaysShared = false } = {}) {
   const port = await vacantPort();
   // Isolated Linux CI runner, ephemeral display; no real workstation, no public RFB listener.
   const display = `:${nextDisplay++}`;
@@ -87,6 +91,7 @@ async function startTiger(t, { securityType = 'None', passwordFile = null } = {}
     '-rfbport', String(port), '-SecurityTypes', securityType, '-localhost', 'yes',
     '-interface', '127.0.0.1', '-nolisten', 'tcp', '-ac'];
   if (passwordFile) args.push('-PasswordFile', passwordFile);
+  if (alwaysShared) args.push('-AlwaysShared');
   const tiger = spawn('Xtigervnc', args, { stdio: ['ignore', 'pipe', 'pipe'] });
   let serverLog = '';
   for (const stream of [tiger.stdout, tiger.stderr]) {
@@ -418,4 +423,43 @@ test('diagnostic: abrupt downstream TCP close releases stock RFB upstream connec
     await closed;
     await waitForRfbSessionRelease(tiger.port);
     console.log('RFB abrupt diagnostic upstream TCP connection released without TigerVNC shutdown');
+  });
+
+test('two concurrent stock RFB sessions remain independent across abrupt disconnects',
+  { skip: !RUN, timeout: 35_000 }, async t => {
+    const tiger = await startTiger(t, { alwaysShared: true });
+    assert.deepEqual(await establishedRfbEndpoints(tiger.port), [], 'TCP readiness probe leaked a session');
+    const gateway = createGateway({ port: 0, allowedPorts: [tiger.port] });
+    const origin = await gateway.listen();
+    t.after(() => gateway.close());
+    const [first, second] = await Promise.all([
+      rfbSession(origin, tiger.port, t),
+      rfbSession(origin, tiger.port, t),
+    ]);
+    assert.equal((await establishedRfbEndpoints(tiger.port)).length, 4,
+      'expected two independent gateway-to-server TCP sessions');
+
+    const firstClosed = once(first.socket, 'close', { signal: AbortSignal.timeout(TIMEOUT_MS) });
+    first.socket.destroy();
+    await firstClosed;
+    await waitForRfbEstablishedCount(tiger.port, 2);
+
+    // A surviving session must remain functional, not merely in ESTABLISHED state.
+    const request = Buffer.alloc(10);
+    request[0] = 3;
+    request.writeUInt16BE(WIDTH, 6);
+    request.writeUInt16BE(HEIGHT, 8);
+    second.write(request);
+    const update = await second.read(4);
+    assert.equal(update[0], 0);
+    assert.equal(update.readUInt16BE(2), 1);
+    const rect = await second.read(12);
+    assert.deepEqual([rect.readUInt16BE(4), rect.readUInt16BE(6), rect.readInt32BE(8)], [WIDTH, HEIGHT, 0]);
+    assert.equal((await second.read(WIDTH * HEIGHT * 4)).length, WIDTH * HEIGHT * 4);
+
+    const secondClosed = once(second.socket, 'close', { signal: AbortSignal.timeout(TIMEOUT_MS) });
+    second.socket.destroy();
+    await secondClosed;
+    await waitForRfbSessionRelease(tiger.port);
+    console.log('RFB concurrent lifecycle: two sessions, first abrupt release, survivor update, second abrupt release confirmed');
   });
