@@ -116,13 +116,19 @@ try {
 
   $compiler = 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
   if(-not (Test-Path -LiteralPath $compiler -PathType Leaf)) { throw 'Pinned runner Inno Setup 6 compiler unavailable; no unverified download allowed.' }
-  Write-Host 'HOSTED BUILD TOOL: verified preinstalled ISCC.exe for Inno Setup 6; version text printed during compilation.'
+  # Use the *installed* runner binary's own help, not a newer documentation
+  # version's flag list. CI initially proved this installed ISCC rejects long
+  # --no-ide-signtools and --define options.
+  $helpText=(& $compiler '/?' 2>&1 | Out-String)
+  Write-Host "HOSTED INNO 6 ACTUAL /? HELP:`n$helpText"
+  if($helpText -notmatch '(?i)(/d|-d)') { throw 'Installed Inno compiler help did not advertise ISPP short /D definitions.' }
   $compilerArgs = @(
-    # Inno 6 compiler rejects newer --no-signing/--no-ide-signtools switches.
+    # Pin the older Inno 6 short -d syntax. Its installed ISCC.exe rejects
+    # newer --define / --no-signing / --no-ide-signtools switches.
     # This script has no SignTool directive, and the output signature is verified below.
-    "--define=CI_Source=$source","--define=CI_Target=$install",
-    "--define=CI_Output=$build","--define=CI_OwnerFile=$ownerFile",
-    "--define=CI_Guid=$guid",$iss
+    "-dCI_Source=$source","-dCI_Target=$install",
+    "-dCI_Output=$build","-dCI_OwnerFile=$ownerFile",
+    "-dCI_Guid=$guid",$iss
   )
   & $compiler @compilerArgs
   if($LASTEXITCODE -ne 0) { throw 'CI-only Inno setup compilation failed.' }
