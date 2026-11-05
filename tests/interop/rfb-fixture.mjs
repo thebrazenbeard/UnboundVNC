@@ -1,9 +1,14 @@
 import net from 'node:net';
 import { EventEmitter } from 'node:events';
 
-// RFC 6143 RFB 3.8 synthetic, loopback-only server. SecurityType None is
-// deliberately supported for byte-level interoperability tests ONLY.
+// RFC 6143 RFB 3.3/3.7/3.8 synthetic, loopback-only server. SecurityType None
+// is deliberately supported for byte-level interoperability tests ONLY.
 const VERSION = Buffer.from('RFB 003.008\n', 'ascii');
+const VERSIONS = Object.freeze({
+  '3.3': Buffer.from('RFB 003.003\n', 'ascii'),
+  '3.7': Buffer.from('RFB 003.007\n', 'ascii'),
+  '3.8': VERSION,
+});
 const MAX_BUFFER = 1024 * 1024;
 const MAX_ENCODINGS = 128;
 const MAX_CUT_TEXT = 4096;
@@ -55,7 +60,7 @@ function attachConnection(socket, fixture) {
     connection.messages.push(message);
     fixture.events.emit('message', connection, message);
   };
-  socket.write(VERSION);
+  socket.write(fixture.versionGreeting);
   socket.on('data', (chunk) => {
     if (connection.buffer.length + chunk.length > MAX_BUFFER) {
       fail('input buffer exceeded');
@@ -67,12 +72,19 @@ function attachConnection(socket, fixture) {
       let consumed = 0;
       if (connection.stage === 'version') {
         if (b.length < 12) return;
-        if (!b.subarray(0, 12).equals(VERSION)) {
+        if (!b.subarray(0, 12).equals(fixture.versionGreeting)) {
           fail('unsupported RFB protocol version');
           return;
         }
-        socket.write(Buffer.from([1, 1])); // 1 security type: None
-        connection.stage = 'security';
+        if (fixture.version === '3.3') {
+          // RFB 3.3 server-selected U32 security type 1; no selection byte
+          // and no SecurityResult for None (RFC 6143 Appendix A.1).
+          socket.write(Buffer.from([0, 0, 0, 1]));
+          connection.stage = 'client-init';
+        } else {
+          socket.write(Buffer.from([1, 1])); // 1 security type: None
+          connection.stage = 'security';
+        }
         consumed = 12;
       } else if (connection.stage === 'security') {
         if (b.length < 1) return;
@@ -85,7 +97,8 @@ function attachConnection(socket, fixture) {
           socket.end(Buffer.concat([result, reason]));
           connection.stage = 'closing';
         } else {
-          socket.write(Buffer.alloc(4)); // SecurityResult OK
+          // RFB 3.7 None omits SecurityResult; 3.8 includes it.
+          if (fixture.version === '3.8') socket.write(Buffer.alloc(4));
           connection.stage = 'client-init';
         }
       } else if (connection.stage === 'client-init') {
@@ -182,7 +195,8 @@ function attachConnection(socket, fixture) {
   return connection;
 }
 
-export function createRfbFixture() {
+export function createRfbFixture({ version = '3.8' } = {}) {
+  if (!Object.hasOwn(VERSIONS, version)) throw new Error('unsupported synthetic RFB version');
   const events = new EventEmitter();
   const connections = new Set();
   const server = net.createServer((socket) => attachConnection(socket, fixture));
@@ -190,6 +204,8 @@ export function createRfbFixture() {
   const fixture = {
     events,
     connections,
+    version,
+    versionGreeting: VERSIONS[version],
     get host() { return '127.0.0.1'; },
     get port() { return server.address()?.port ?? null; },
     async start() {
