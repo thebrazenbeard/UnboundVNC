@@ -71,3 +71,23 @@ establish server identity/host consent.
 Passing this script establishes **UI interaction and rendering only**. It
 does not prove noVNC framebuffer display, authentication, secure connectivity,
 Windows host support, or RealVNC feature parity.
+
+## Real pointer and keyboard delivery into a disposable stock X11 window
+
+`Stock TigerVNC Chromium input witness (loopback)` runs `node e2e/stock-input.mjs`
+on hosted Ubuntu. `Xtigervnc` provides a fresh, test-owned 480×320 X11 display
+and loopback RFB endpoint. A separate, independently packaged `xev` X11 window
+records actual ButtonPress/KeyPress events, and `xdotool` focuses that window.
+Playwright Chromium interacts with the **visible noVNC canvas** via the normal
+viewer and one-port-allowlisted loopback gateway; it never injects directly
+into X11. Before its positive click and `k` keystroke, it enables the viewer's
+**View only** switch and requires that a click and `v` keystroke produce *no*
+new X11 input events. Then it disables view-only and requires `xev` to record
+button 1 at root coordinate 240,160 and keysym `k`.
+
+The screenshot and `x11-input-result.json` artifact are captured from the
+actual hosted browser and X11 event witness, not a mocked event handler.
+There are no credentials, user-owned desktops, public ports or real-system
+input devices. **View only is a browser preference, not a host authorization
+boundary**. A pass proves this Ubuntu/Chromium/stock-RFB input path only, not
+Windows native input injection, host consent or transport encryption.
