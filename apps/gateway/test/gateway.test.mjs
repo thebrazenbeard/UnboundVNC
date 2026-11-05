@@ -214,26 +214,6 @@ test('incomplete HTTP Upgrade headers cannot hold a burst of gateway sockets bey
     const drip = setInterval(() => { if (!socket.destroyed) socket.write('a'); }, 1000);
     socket.on('close', () => clearInterval(drip));
   }
-  // A completed health request must not create a keep-alive escape hatch:
-  // its next partial Upgrade has to receive a fresh absolute deadline.
-  const reused = connect({ host: '127.0.0.1', port });
-  reused.on('error', () => {});
-  sockets.push(reused);
-  const response = new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('health response timeout')), 1500);
-    let received = '';
-    reused.on('data', chunk => {
-      received += chunk.toString();
-      if (received.includes('"ok":true')) { clearTimeout(timer); resolve(); }
-    });
-  });
-  reused.write(`GET /api/health HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nConnection: keep-alive\r\n\r\n`);
-  await response;
-  assert.equal(reused.destroyed, false);
-  closures.push(closedWithin(reused));
-  reused.write(`GET /ws/session/incomplete HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nConnection: Upgrade\r\nX-Slow: `);
-  const reusedDrip = setInterval(() => { if (!reused.destroyed) reused.write('a'); }, 1000);
-  reused.on('close', () => clearInterval(reusedDrip));
   await Promise.all(closures);
   const ticket = await (await session(f)).json();
   const connected = await upgrade(f, ticket.wsPath);
@@ -266,6 +246,49 @@ test('pre-upgrade partial HTTP sockets have a separate admission cap', async t =
   for (const socket of sockets) socket.destroy();
   await Promise.all(closed);
   // Admission must recover as promptly as the stalled clients disconnect.
+  const grant = await session(f);
+  assert.equal(grant.headers.get('connection'), 'close');
+  const ticket = await grant.json();
+  const recovered = await upgrade(f, ticket.wsPath);
+  assert.match(recovered.response, /^HTTP\/1\.1 101/);
+  assert.equal((await recovered.nextFrame()).toString(), 'RFB 003.008\n');
+  recovered.socket.destroy();
+});
+
+test('completed health keep-alives cannot churn indefinitely across all HTTP admission slots', async t => {
+  const sockets = [];
+  t.after(() => { for (const socket of sockets) socket.destroy(); });
+  const f = await fixture(t);
+  const port = Number(new URL(f.url).port);
+  const health = `GET /api/health HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nConnection: keep-alive\r\n\r\n`;
+  const responses = [];
+  const closures = [];
+  for (let i = 0; i < 16; i++) {
+    const socket = connect({ host: '127.0.0.1', port });
+    socket.on('error', () => {});
+    sockets.push(socket);
+    responses.push(new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('health response timeout')), 1200);
+      let received = '';
+      socket.on('data', chunk => {
+        received += chunk.toString();
+        if (received.includes('"ok":true')) { clearTimeout(timeout); resolve(received); }
+      });
+    }));
+    closures.push(new Promise(resolve => socket.once('close', resolve)));
+    socket.write(health);
+  }
+  const received = await Promise.all(responses);
+  for (const reply of received) {
+    assert.match(reply, /^HTTP\/1\.1 200/);
+    assert.match(reply.toLowerCase(), /\r\nconnection: close\r\n/);
+  }
+  // With reusable keep-alive, sixteen clients can reissue health forever and
+  // occupy every pending HTTP slot. After one response all must instead FIN.
+  await new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error('health keep-alives retained the full 16-slot pool')), 1500);
+    Promise.all(closures).then(() => { clearTimeout(timeout); resolve(); }, reject);
+  });
   const ticket = await (await session(f)).json();
   const recovered = await upgrade(f, ticket.wsPath);
   assert.match(recovered.response, /^HTTP\/1\.1 101/);
