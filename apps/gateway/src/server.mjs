@@ -43,10 +43,15 @@ function validOrigin(req, localPort) {
 }
 
 /** Local-only WebSocket/RFB bridge. Call gateway.listen() before using it. */
-export function createGateway({ port = 6081, host = '127.0.0.1' } = {}) {
+export function createGateway({ port = 6081, host = '127.0.0.1', allowedPorts = [5900] } = {}) {
   if (host !== '127.0.0.1' || !Number.isInteger(port) || port < 0 || port > 65535) {
     throw new Error('Gateway must bind to IPv4 loopback on a valid port');
   }
+  if (!Array.isArray(allowedPorts) || allowedPorts.length === 0 || allowedPorts.length > 32 ||
+      allowedPorts.some(p => !Number.isInteger(p) || p < 1 || p > 65535)) {
+    throw new Error('Gateway requires a nonempty explicit allowlist of valid RFB TCP ports');
+  }
+  const permittedPorts = new Set(allowedPorts);
   const tickets = new Map();
   const connections = new Set();
   let localPort = port;
@@ -73,6 +78,7 @@ export function createGateway({ port = 6081, host = '127.0.0.1' } = {}) {
       if (!target || !['localhost', '127.0.0.1'].includes(target.host) || !Number.isInteger(target.port) || target.port < 1 || target.port > 65535) {
         return sendJson(res, 400, { error: 'target_must_be_loopback' });
       }
+      if (!permittedPorts.has(target.port)) return sendJson(res, 403, { error: 'target_port_not_allowed' });
       for (const [key, ticket] of tickets) if (ticket.expires < Date.now()) tickets.delete(key);
       if (tickets.size >= 64) return sendJson(res, 429, { error: 'too_many_tickets' });
       const id = randomBytes(32).toString('base64url');
