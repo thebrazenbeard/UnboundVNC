@@ -28,7 +28,10 @@ var (
 const viewOnly = "view-only"
 
 var serviceNamePattern = regexp.MustCompile(`^[a-z0-9-]{1,63}(?:\.[a-z0-9-]{1,63})+\.ts\.net$`)
-var nodeIDPattern = regexp.MustCompile(`^node:[A-Za-z0-9_-]{1,64}$`)
+// StableNodeID is opaque, not an invented "node:" namespace. Actual Tailscale
+// values include e.g. "n5SUKe8CNTRL"; other control planes may differ. Only
+// exact configured matches grant admission; reject wildcard/control chars.
+var nodeIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$`)
 
 type Config struct {
 	Enabled     bool
