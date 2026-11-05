@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"time"
 
+	"golang.org/x/net/netutil"
 	"tailscale.com/client/tailscale/apitype"
 	"tailscale.com/tsnet"
 )
@@ -211,5 +212,13 @@ func (a *candidate) servePrivate(server *tsnet.Server) error {
 		return err
 	}
 	defer listener.Close()
-	return http.Serve(listener, a)
+	// A future opt-in implementation must never inherit http.Serve's default
+	// unlimited header/idle deadlines or unbounded accepted connection count.
+	return boundedServer(a).Serve(netutil.LimitListener(listener, 8))
+}
+
+func boundedServer(handler http.Handler) *http.Server {
+	return &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout: 15 * time.Second, WriteTimeout: 15 * time.Second,
+		IdleTimeout: 5 * time.Second, MaxHeaderBytes: 8 << 10}
 }
