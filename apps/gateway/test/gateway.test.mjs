@@ -203,6 +203,41 @@ test('quiet authorized sessions survive multiple WebSocket heartbeats', async t 
   assert.equal(echoed, 'still connected');
 });
 
+test('unsolicited and stale Pong frames cannot satisfy a heartbeat challenge', async t => {
+  const f = await fixture(t, { heartbeatMs: 100 });
+  const ticket = await (await session(f)).json();
+  const connected = await upgrade(f, ticket.wsPath);
+  t.after(() => connected.socket.destroy());
+  connected.socket.on('error', () => {});
+  assert.equal((await connected.nextFrame()).toString(), 'RFB 003.008\n');
+  connected.socket.write(maskedFrame('unsolicited', 10));
+  const ping = await connected.nextPacket();
+  assert.equal(ping.opcode, 9);
+  connected.socket.write(maskedFrame(Buffer.alloc(ping.body.length, 0), 10));
+  await new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error('stale Pong incorrectly kept the session alive')), 1200);
+    connected.socket.once('close', () => { clearTimeout(timeout); resolve(); });
+  });
+});
+
+test('coalesced large valid client frames stay bounded without false rejection', async t => {
+  const f = await fixture(t);
+  const ticket = await (await session(f)).json();
+  const connected = await upgrade(f, ticket.wsPath);
+  t.after(() => connected.socket.destroy());
+  assert.equal((await connected.nextFrame()).toString(), 'RFB 003.008\n');
+  const payload = Buffer.alloc(700 * 1024, 0x42);
+  connected.socket.write(Buffer.concat([maskedBinary(payload), maskedBinary(payload)]));
+  let received = 0;
+  while (received < payload.length * 2) {
+    const packet = await connected.nextPacket();
+    assert.equal(packet.opcode, 2);
+    received += packet.body.length;
+  }
+  assert.equal(received, payload.length * 2);
+  assert.equal(connected.socket.destroyed, false);
+});
+
 test('sustained RFB traffic can exceed 64 MiB without lifetime-byte disconnect', async t => {
   const CHUNK = 64 * 1024;
   const TARGET = 65 * 1024 * 1024;
