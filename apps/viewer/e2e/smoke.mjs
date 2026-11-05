@@ -139,7 +139,9 @@ async function run() {
     const desktopImage = path.join(screenshotDir, 'dashboard-desktop.png');
     await page.screenshot({ path: desktopImage, fullPage: true });
 
-    await page.locator('.device-card [data-action="connect"]').click();
+    // The directory now has two saved profiles; target one by its saved name.
+    await page.locator('.device-card').filter({ hasText: 'Alpha Renamed PC' })
+      .locator('[data-action="connect"]').click();
     await page.locator('#connection-error-message').waitFor();
     assert.equal(await page.locator('#connection-error-message').textContent(),
       'Gateway intentionally disabled for UI smoke test');
