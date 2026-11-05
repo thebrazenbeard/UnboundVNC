@@ -31,8 +31,10 @@ function Assert-TestOwnedRoot([string]$candidate) {
 }
 
 function Assert-CopiedPayload([string]$original, [string]$copy) {
-  $originalFiles = @(Get-ChildItem -LiteralPath $original -File -Recurse)
-  $copyFiles = @(Get-ChildItem -LiteralPath $copy -File -Recurse)
+  Assert-NoReparseDescendants $original
+  Assert-NoReparseDescendants $copy
+  $originalFiles = @(Get-ChildItem -LiteralPath $original -File -Recurse -Force)
+  $copyFiles = @(Get-ChildItem -LiteralPath $copy -File -Recurse -Force)
   if ($originalFiles.Count -eq 0 -or $originalFiles.Count -ne $copyFiles.Count) {
     throw 'Copied desktop payload has a missing/extra file.'
   }
@@ -54,6 +56,36 @@ function Assert-CopiedPayload([string]$original, [string]$copy) {
     }
   }
   Write-Host "COPY INTEGRITY: $($originalFiles.Count) files matched SHA256, including EXE and app.asar."
+}
+
+function Assert-NoReparseDescendants([string]$root) {
+  $items = @(Get-ChildItem -LiteralPath $root -Recurse -Force)
+  foreach ($item in $items) {
+    if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+      throw "Reparse point refused in lifecycle payload: $($item.FullName)"
+    }
+  }
+}
+
+function Get-PayloadManifest([string]$root) {
+  $files = @(Get-ChildItem -LiteralPath $root -File -Recurse -Force)
+  $manifest = @{}
+  foreach ($file in $files) {
+    $relative = [IO.Path]::GetRelativePath($root, $file.FullName)
+    $manifest[$relative] = "$(($file.Length)):$((Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash)"
+  }
+  return $manifest
+}
+
+function Assert-ManifestUnchanged([hashtable]$before, [hashtable]$after) {
+  if ($before.Count -eq 0 -or $before.Count -ne $after.Count) {
+    throw 'Original build manifest file count changed during lifecycle test.'
+  }
+  foreach ($relative in $before.Keys) {
+    if (-not $after.ContainsKey($relative) -or $before[$relative] -cne $after[$relative]) {
+      throw "Original build was modified during lifecycle test: $relative"
+    }
+  }
 }
 
 function Assert-ClosedPort([int]$port) {
@@ -81,12 +113,37 @@ if ($Mode -eq 'guard') {
     if (-not $rejected) { throw "Cleanup path guard accepted unsafe target: $bad" }
   }
   Write-Host 'GUARD PASS: runner root, parent, forged name, nested path, and traversal all rejected.'
+
+  # A junction inside a disposable fixture proves that recursive cleanup will
+  # reject descendant reparse points. Nothing points outside this owned fixture.
+  $probe = Assert-TestOwnedRoot (Join-Path $originalRunnerTemp ('unboundvnc-viewer-lifecycle-' + [guid]::NewGuid().ToString('N')))
+  $null = New-Item -ItemType Directory -Path $probe
+  $target = Join-Path $probe 'private-target'
+  $junction = Join-Path $probe 'junction'
+  $null = New-Item -ItemType Directory -Path $target
+  try {
+    try { $null = New-Item -ItemType Junction -Path $junction -Target $target -ErrorAction Stop }
+    catch { Write-Host "REPARSE FIXTURE UNAVAILABLE (not a pass): $($_.Exception.Message)" }
+    if (Test-Path -LiteralPath $junction) {
+      $rejected = $false
+      try { Assert-NoReparseDescendants $probe } catch { $rejected = $true }
+      if (-not $rejected) { throw 'Descendant junction escaped reparse guard.' }
+      Write-Host 'REPARSE GUARD PASS: nested directory junction was rejected.'
+    }
+  } finally {
+    if (Test-Path -LiteralPath $junction) { Remove-Item -LiteralPath $junction -Force }
+    if (Test-Path -LiteralPath $junction) { throw 'Could not unlink test-owned junction; refusing recursive cleanup.' }
+    Assert-NoReparseDescendants $probe
+    Remove-Item -LiteralPath $probe -Recurse -Force
+  }
   return
 }
 
 if (-not (Test-Path -LiteralPath (Join-Path $source 'UnboundVNCViewer.exe') -PathType Leaf)) {
   throw 'Built Windows viewer source folder is missing; no synthetic substitute allowed.'
 }
+Assert-NoReparseDescendants $source
+$beforeManifest = Get-PayloadManifest $source
 $stageId = [guid]::NewGuid().ToString('N')
 $stage = Assert-TestOwnedRoot (Join-Path $originalRunnerTemp "unboundvnc-viewer-lifecycle-$stageId")
 $copy = Join-Path $stage 'UnboundVNCViewer-win32-x64'
@@ -178,12 +235,12 @@ try {
         (Get-Content -LiteralPath $marker -Raw) -cne $stageId) {
       throw 'Refusing cleanup: unique stage ownership marker absent or modified.'
     }
+    Assert-NoReparseDescendants $stage
     Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction Stop
   }
   if (Test-Path -LiteralPath $stage) { throw 'Uninstall-style cleanup failed to remove copied folder, receipts and isolated profile.' }
-  if (-not (Test-Path -LiteralPath (Join-Path $source 'UnboundVNCViewer.exe') -PathType Leaf)) {
-    throw 'Cleanup unexpectedly modified the source build folder.'
-  }
-  Write-Host 'REVERSIBLE TEST COPY CLEANUP PASS: only uniquely marked runner-temp sandbox removed; source build preserved. No registry, services, firewall, startup, machine install or release changed.'
+  Assert-NoReparseDescendants $source
+  Assert-ManifestUnchanged $beforeManifest (Get-PayloadManifest $source)
+  Write-Host "REVERSIBLE TEST COPY CLEANUP PASS: only uniquely marked runner-temp sandbox removed; all $($beforeManifest.Count) original build files retained identical SHA256. No registry, services, firewall, startup, machine install or release changed."
 }
 if ($Mode -eq 'full' -and -not $completed) { throw 'Lifecycle acceptance did not complete.' }

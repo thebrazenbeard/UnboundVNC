@@ -82,7 +82,8 @@ The separate `windows-viewer-copy-lifecycle.yml` workflow tests a fuller
 
 1. Build an unsigned Electron app folder under runner temp; copy the entire
    folder into a unique GUID-named, ownership-marked runner-temp sandbox and
-   compare SHA256 for **every file** (including `.exe` and `app.asar`).
+   compare SHA256 for **every file**, including hidden/system files, `.exe`
+   and `app.asar`; reject descendant symlinks/junctions/reparse points.
 2. Launch **the copied executable** using a fresh `userData` profile inside
    that sandbox; start only a synthetic loopback RFB 3.8 fixture. The actual
    Electron renderer submits Quick Connect, receives a 2×2 RGBX framebuffer,
@@ -92,9 +93,10 @@ The separate `windows-viewer-copy-lifecycle.yml` workflow tests a fuller
    and closure of both app-owned loopback listeners plus the synthetic RFB
    fixture listener. The sandbox (copied folder, profile, and test receipts) is
    removed in `finally` after killing any surviving **owned child processes**;
-   the original build folder must remain untouched.
+   **every** original build file must retain the same SHA256/size manifest.
 4. Independently test unsafe cleanup-target rejection and an injected exception
-   immediately after the copy to verify bounded cleanup under failure.
+   immediately after the copy to verify bounded cleanup under failure; test a
+   nested-junction rejection where hosted Windows permits a test-owned junction.
 
 No app folder/binary, profile or framebuffer is uploaded. The test touches no
 user machine, installer registry entries, Windows service, firewall rule,
