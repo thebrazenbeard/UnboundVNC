@@ -154,6 +154,51 @@ async function run() {
     await page.locator('#quick-host').waitFor();
     const mobileImage = path.join(screenshotDir, 'dashboard-mobile.png');
     await page.screenshot({ path: mobileImage, fullPage: true, animations: 'disabled' });
+
+    // A rename can cause its card to disappear from the active search filter.
+    // The Edit button is replaced/hidden, so keyboard focus must return to
+    // the Search field instead of falling into the document body.
+    await page.locator('#connection-error-dismiss').click();
+    await page.locator('#device-search').fill('Charlie');
+    assert.equal(await page.locator('.device-card').count(), 1);
+    await page.getByRole('button', { name: 'Edit Charlie Test PC' }).focus();
+    await page.keyboard.press('Enter');
+    await page.locator('#device-form input[name="name"]').fill('Delta Filtered PC');
+    await page.locator('#device-form button[type="submit"]').click();
+    assert.equal(await page.locator('.device-card').count(), 0,
+      'renamed profile must disappear when it no longer matches the search');
+    assert.equal(await page.locator('#device-search').evaluate(el => el === document.activeElement), true,
+      'excluded rename must return keyboard focus to the search field');
+    await page.locator('#device-search').fill('');
+    assert.deepEqual(await page.locator('.device-card h3').allTextContents(),
+      ['Alpha Renamed PC', 'Delta Filtered PC']);
+
+    // Deleting the last card exercises the empty-state Add fallback. It must
+    // be keyboard-reachable immediately after the final removal.
+    await page.getByRole('button', { name: 'Remove Alpha Renamed PC' }).focus();
+    page.once('dialog', dialog => dialog.accept());
+    await page.keyboard.press('Enter');
+    assert.equal(await page.locator('.device-card').count(), 1);
+    assert.equal(await page.getByRole('button', { name: 'Remove Delta Filtered PC' })
+      .evaluate(el => el === document.activeElement), true,
+    'deleting the first of two cards should focus the surviving Remove action');
+    page.once('dialog', dialog => dialog.accept());
+    await page.keyboard.press('Enter');
+    assert.equal(await page.locator('.device-card').count(), 0);
+    assert.equal(await page.locator('#devices-grid [data-action="add"]')
+      .evaluate(el => el === document.activeElement), true,
+    'deleting the final profile should focus Add in the empty state');
+    await page.waitForFunction(() => !document.querySelector('#toasts .toast'),
+      null, { timeout: 7_000 });
+    await page.screenshot({ path: path.join(screenshotDir, 'directory-empty-mobile.png'),
+      fullPage: true, animations: 'disabled' });
+    await page.reload({ waitUntil: 'networkidle' });
+    assert.equal(await page.locator('.device-card').count(), 0,
+      'deleting the final saved profile persists an empty directory across reload');
+    await writeFile(path.join(screenshotDir, 'directory-edge-focus-result.json'), JSON.stringify({
+      filteredRenameRemovedCard: true, focusReturnedToSearch: true,
+      lastDeviceRemoved: true, focusMovedToEmptyAdd: true, emptyDirectorySurvivedReload: true,
+    }, null, 2));
     assert.equal(browserEvents.filter(event => event.type === 'pageerror').length, 0,
       'viewer has no uncaught browser exceptions');
     succeeded = true;
