@@ -116,7 +116,7 @@ export function createGateway({ port = 6081, host = '127.0.0.1', allowedPorts = 
     let buffered = Buffer.alloc(0);
     let fragment = false;
     let heartbeatTimer;
-    let waitingForPong = false;
+    let expectedPong = null;
     function cleanup() {
       if (closed) return;
       closed = true;
@@ -143,9 +143,9 @@ export function createGateway({ port = 6081, host = '127.0.0.1', allowedPorts = 
       // A quiet remote desktop is still an active session. Probe the browser
       // instead of disconnecting solely because no framebuffer changed.
       heartbeatTimer = setInterval(() => {
-        if (waitingForPong) return cleanup();
-        waitingForPong = true;
-        ws.write(frame(9, randomBytes(8)));
+        if (expectedPong) return cleanup();
+        expectedPong = randomBytes(8);
+        ws.write(frame(9, expectedPong));
       }, heartbeatMs);
       heartbeatTimer.unref();
       if (head.length) ingest(head);
@@ -170,8 +170,19 @@ export function createGateway({ port = 6081, host = '127.0.0.1', allowedPorts = 
     rfb.on('drain', () => ws.resume());
     ws.on('data', data => { if (upgraded && !closed) ingest(data); });
     function ingest(data) {
-      if (buffered.length + data.length > MAX_BUFFERED) return cleanup();
-      buffered = Buffer.concat([buffered, data]);
+      // A TCP read can coalesce multiple valid WebSocket frames. Append in
+      // bounded pieces and parse between them rather than rejecting the read.
+      let offset = 0;
+      while (offset < data.length && !closed) {
+        const room = MAX_BUFFERED - buffered.length;
+        if (room <= 0) return cleanup();
+        const count = Math.min(room, data.length - offset);
+        buffered = Buffer.concat([buffered, data.subarray(offset, offset + count)]);
+        offset += count;
+        parseBuffered();
+      }
+    }
+    function parseBuffered() {
       while (buffered.length >= 2) {
         const first = buffered[0];
         const second = buffered[1];
@@ -197,7 +208,13 @@ export function createGateway({ port = 6081, host = '127.0.0.1', allowedPorts = 
         for (let i = 0; i < payload.length; i++) payload[i] ^= mask[i % 4];
         if (opcode === 8) { ws.write(frame(8)); return cleanup(); }
         if (opcode === 9) { if (payload.length > 125 || !fin) return cleanup(); ws.write(frame(10, payload)); continue; }
-        if (opcode === 10) { if (payload.length > 125 || !fin) return cleanup(); waitingForPong = false; continue; }
+        if (opcode === 10) {
+          if (payload.length > 125 || !fin) return cleanup();
+          // RFC 6455 permits unsolicited Pong. Only the matching outstanding
+          // challenge proves that this peer read our most recent Ping.
+          if (expectedPong?.equals(payload)) expectedPong = null;
+          continue;
+        }
         if (opcode !== 2 && opcode !== 0) return cleanup();
         if (opcode === 0 && !fragment || opcode === 2 && fragment) return cleanup();
         fragment = !fin;
