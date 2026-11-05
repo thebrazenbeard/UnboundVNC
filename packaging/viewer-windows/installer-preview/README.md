@@ -17,6 +17,17 @@ This is not the actual Windows user's `%LOCALAPPDATA%`, and it intentionally doe
 
 The hosted acceptance performs both negative and positive paths, including an actual Electron EXE launch from the staged destination: synthetic loopback RFB 3.8 RGBX 2×2 renderer canvas must match all 16 RGBA bytes red/green/blue/white, explicit Disconnect, app and gateway exit, and all three known loopback ports closed. It then exercises unknown-file, exclusive file-handle, nested junction, ownership and rollback guards. The test harness alone finally deletes the GUID-owned ephemeral sandbox and retained synthetic profile; `RemoveTest` itself intentionally **does not** delete profile/data or arbitrary unknown files.
 
+The separate hosted concurrency acceptance (Draft #55) first demonstrated a
+real defect: `RecoverTest` could delete a **still-running** `ApplyTest` journal
+sandbox. All preview operations now acquire a **nonblocking named Windows OS
+mutex** keyed to the validated ephemeral root GUID before touching it; an
+active competing Apply/Recover/Remove operation is rejected without mutation.
+The kernel mutex is released on normal exit or process termination; recovery
+after a killed owner still must pass the existing marker/journal/hash guards.
+Hosted tests exercise both live Apply and live Remove contention. This is a
+CI coordination mechanism, not protection against malicious same-user code,
+kernel compromise, arbitrary filesystem swaps or power loss.
+
 Important limits:
 
 - Environment-based CI gating is a test safeguard, **not a Windows security boundary** against someone controlling a local process and its environment. These scripts are **not supported for real user installation**.

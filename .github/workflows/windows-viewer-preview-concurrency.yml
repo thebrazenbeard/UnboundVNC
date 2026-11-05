@@ -1,0 +1,49 @@
+name: Windows viewer preview transaction concurrency
+
+on:
+  pull_request:
+    paths:
+      - 'packaging/viewer-windows/installer-preview/**'
+      - '.github/workflows/windows-viewer-preview-concurrency.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  windows-preview-concurrency:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out exact PR source without persisted credentials
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Node 24 source/build tooling
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Build viewer and install pinned Electron packaging dependencies
+        shell: pwsh
+        run: |
+          npm ci --prefix apps/viewer --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { throw 'Viewer npm ci failed.' }
+          npm run build --prefix apps/viewer
+          if ($LASTEXITCODE -ne 0) { throw 'Viewer build failed.' }
+          npm ci --prefix packaging/viewer-windows --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { throw 'Desktop npm ci failed.' }
+          node --test packaging/viewer-windows/tests/local-server.test.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'Loopback source tests failed.' }
+      - name: Create unsigned app folder solely under ephemeral RUNNER_TEMP
+        shell: pwsh
+        run: |
+          node packaging/viewer-windows/scripts/prepare.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'Desktop source prepare failed.' }
+          $out = Join-Path $env:RUNNER_TEMP 'unboundvnc-viewer-desktop-check'
+          & './packaging/viewer-windows/node_modules/.bin/electron-packager.cmd' packaging/viewer-windows UnboundVNCViewer --platform=win32 --arch=x64 --out=$out --asar
+          if ($LASTEXITCODE -ne 0) { throw 'Unsigned app folder build failed.' }
+      - name: Verify live Apply/Recover/Remove contention and abandoned-owner recovery
+        shell: pwsh
+        run: ./packaging/viewer-windows/installer-preview/Invoke-HostedConcurrencyAcceptance.ps1 -Mode Verify
+
+      # Prior baseline on PR55 head 18c11e7 proved live-owner deletion (red).
+      # No installer, profile, framebuffer or binary artifact upload.
