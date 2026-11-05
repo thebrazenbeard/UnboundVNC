@@ -2,7 +2,7 @@
 
 This is an **attended experimental local host**, not a production remote-access service. It targets .NET 8 WinForms on Windows and serves RFB 3.8 on **127.0.0.1:5901 only**. The local user must explicitly choose **Approve view only** (default) or **Allow control** for each connection, before any RFB protocol or framebuffer bytes are sent. Approved sessions expire after five minutes. The operator can Stop and revoke. Windows lock/disconnect and nondefault input desktop checks cause the connection to stop. A post-capture desktop/consent-epoch check attempts to prevent sending stale frames after revocation; this is not an atomic guarantee against a transition during network writes.
 
-The previous attended view-only host passed a hosted Windows .NET 8 Release **build**, but no real interactive host session has been performed. This draft's native input integration requires its own exact-head build/test receipt. Protocol interoperability, capture, consent visibility, native input effectiveness, crash handling, and lock/UAC behavior remain **runtime-unverified**. Windows compilation and mocked effect-gate tests cannot prove physical input behavior.
+The attended host is built and checked on Windows .NET 8 in pull-request CI; inspect the exact-head run before treating a result as current. No real interactive host session has been performed. Protocol interoperability, capture, consent visibility, native input effectiveness, crash handling, and lock/UAC behavior remain **runtime-unverified**. Windows compilation and mocked effect-gate tests cannot prove physical input behavior.
 
 ## Restricted attended local control prototype
 

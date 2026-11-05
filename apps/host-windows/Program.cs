@@ -224,7 +224,7 @@ internal sealed class HostWindow : Form
                     Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter,
                     Text = "One attended session, at most five minutes. View only is the default.\n" +
                            "Allow control also permits basic typing and pointer movement/clicks.\n" +
-                           "RFB None authentication is safe here ONLY on 127.0.0.1:5901.\n" +
+                           "RFB None authentication is used ONLY on 127.0.0.1:5901.\n" +
                            "Never tunnel or expose this prototype. Stop and revoke remains available."
                 };
                 var buttons = new FlowLayoutPanel {
