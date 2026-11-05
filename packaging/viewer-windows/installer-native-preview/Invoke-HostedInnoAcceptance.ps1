@@ -419,6 +419,136 @@ try {
   $null=Assert-InstallOwned $before
   Write-Host 'NATIVE VALID-PLAN REFUSAL PASS: original uninstaller refused engine-valid same-AppId foreign log; pristine SHA256 restored.'
 
+  # Stronger identity falsifier: create an engine-valid hostile log for the
+  # ORIGINAL install path, not a sibling's different path. Temporarily move
+  # the entire quiescent, SHA256-inventoried original app folder to a sibling
+  # within the same owned GUID root, run a second hostile setup at the exact
+  # vacated path, positively prove its own native uninstaller deletes only
+  # its app and our synthetic decoy, and restore the original app in finally.
+  # Never move, delete or probe outside this exact test-owned RUNNER_TEMP root.
+  $sameRootBuild=Join-Path $root 'same-root-probe-compiler-output'
+  $originalBackup=Join-Path $root 'same-root-original-app-backup'
+  $probeQuarantine=Join-Path $root 'same-root-probe-quarantine'
+  $sameRootLog=Join-Path $root 'same-root-crc-valid-unins000.dat.test-backup'
+  foreach($testPath in @($install,$sameRootBuild,$originalBackup,$probeQuarantine,$sameRootLog,$decoy)) {
+    $resolvedTestPath=[IO.Path]::GetFullPath($testPath)
+    if(-not $resolvedTestPath.StartsWith("$root\",[StringComparison]::OrdinalIgnoreCase)) {
+      throw "Refusing same-root native log test outside GUID-owned root: $testPath"
+    }
+  }
+  if((Get-Content -LiteralPath $marker -Raw) -cne $guid -or
+      (Get-Content -LiteralPath $installedOwner -Raw) -cne $guid) {
+    throw 'Same-root probe refuses missing or altered GUID ownership markers.'
+  }
+  if((Test-Path -LiteralPath $originalBackup) -or (Test-Path -LiteralPath $probeQuarantine)) {
+    throw 'Same-root probe refuses pre-existing backup/quarantine paths.'
+  }
+  $null=Assert-InstallOwned $before
+  Assert-NoReparse $root
+  $originalInstalledManifest=Get-FileManifest $install
+  $null=New-Item -ItemType Directory -Path $sameRootBuild -Force
+  $sameRootCompilerArgs=@(
+    "-dCI_Source=$source","-dCI_Target=$install",
+    "-dCI_Output=$sameRootBuild","-dCI_OwnerFile=$ownerFile",
+    "-dCI_Guid=$guid","-dCI_ManifestFile=$manifestFile",
+    "-dCI_ManifestHash=$manifestHash","-dCI_ManifestCount=$($manifestRows.Count)",
+    "-dCI_ProbeDelete=$decoy",$iss
+  )
+  & $compiler @sameRootCompilerArgs
+  if($LASTEXITCODE -ne 0) { throw 'CI-only same-root hostile-plan compilation failed.' }
+  $sameRootSetup=Join-Path $sameRootBuild 'UnboundVNCViewer-CI-ONLY-Setup.exe'
+  if(-not (Test-Path -LiteralPath $sameRootSetup -PathType Leaf) -or
+      (Get-AuthenticodeSignature -LiteralPath $sameRootSetup).Status -ne 'NotSigned') {
+    throw 'Same-root hostile-plan setup absent or unexpectedly signed.'
+  }
+  $originalMoved=$false
+  try {
+    Move-Item -LiteralPath $install -Destination $originalBackup
+    $originalMoved=$true
+    if(Test-Path -LiteralPath $install) { throw 'Original install path was not vacated before test-only setup.' }
+    if((Get-Content -LiteralPath (Join-Path $originalBackup '.unboundvnc-ci-installer-owned') -Raw) -cne $guid) {
+      throw 'Original app backup lost GUID ownership marker during rename.'
+    }
+    Assert-ManifestEqual $originalInstalledManifest (Get-FileManifest $originalBackup)
+    Write-Host "SAME-ROOT ORIGINAL BACKUP PASS: $($originalInstalledManifest.Count) exact original installed hashes retained in GUID-owned sibling."
+
+    $sameRootProcess=Start-Process -FilePath $sameRootSetup -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-') -PassThru
+    try {
+      if(-not $sameRootProcess.WaitForExit(60000)) { throw 'Same-root test-owned Inno setup exceeded 60-second bound.' }
+      if($sameRootProcess.ExitCode -ne 0) { throw "Same-root Inno setup exited $($sameRootProcess.ExitCode)." }
+    } finally {
+      if(-not $sameRootProcess.HasExited) { $sameRootProcess.Kill(); $null=$sameRootProcess.WaitForExit(5000) }
+    }
+    $sameRootDat=Join-Path $install 'unins000.dat'
+    $sameRootUninstaller=Join-Path $install 'unins000.exe'
+    if(-not (Test-Path -LiteralPath $sameRootDat -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $sameRootUninstaller -PathType Leaf) -or
+        (Get-Content -LiteralPath $installedOwner -Raw) -cne $guid) {
+      throw 'Same-root native fixture lacks real generated log/uninstaller/exact ownership marker.'
+    }
+    Assert-NoReparse $install
+    Copy-Item -LiteralPath $sameRootDat -Destination $sameRootLog
+    $sameRootLogHash=(Get-FileHash -LiteralPath $sameRootLog -Algorithm SHA256).Hash
+    if($sameRootLogHash -ceq $datHash) { throw 'Same-root hostile native log unexpectedly identical to original.' }
+
+    $sameRootExit=Invoke-NativeUninstallerBounded $sameRootUninstaller 'same-root valid-plan positive control'
+    $sameRootDeadline=[DateTime]::UtcNow.AddSeconds(15)
+    while((Test-Path -LiteralPath $install) -and [DateTime]::UtcNow -lt $sameRootDeadline) {
+      Start-Sleep -Milliseconds 200
+    }
+    $sameRootDecoyPresent=Test-Path -LiteralPath $decoy
+    $sameRootAppPresent=Test-Path -LiteralPath $install
+    Write-Host "NATIVE SAME-ROOT CONTROL READBACK: exit=$sameRootExit decoyPresent=$sameRootDecoyPresent probeAppPresent=$sameRootAppPresent."
+    if($sameRootExit -ne 0 -or $sameRootDecoyPresent -or $sameRootAppPresent) {
+      throw "Same-root positive control not qualified: exit=$sameRootExit decoyPresent=$sameRootDecoyPresent probeAppPresent=$sameRootAppPresent."
+    }
+    Set-Content -LiteralPath $decoy -Value 'test-owned decoy not part of install' -NoNewline
+    if((Get-FileHash -LiteralPath $decoy -Algorithm SHA256).Hash -cne $decoyHash) {
+      throw 'Same-root native control could not restore exact test-owned decoy.'
+    }
+    Write-Host "NATIVE SAME-ROOT CONTROL PASS: engine-generated same-path log SHA256=$sameRootLogHash; B native uninstaller deleted only its app and GUID-owned sibling decoy."
+  } finally {
+    if($originalMoved) {
+      $probeMarkerAmbiguous=$false
+      if(Test-Path -LiteralPath $install) {
+        # Never overwrite or delete a potentially active probe. Move it intact
+        # to a fresh quarantine inside the SAME GUID root; the native engine
+        # may already have removed the probe marker during a failed uninstall.
+        Assert-NoReparse $install
+        if(-not (Test-Path -LiteralPath $installedOwner -PathType Leaf) -or
+            (Get-Content -LiteralPath $installedOwner -Raw) -cne $guid) {
+          $probeMarkerAmbiguous=$true
+        }
+        Move-Item -LiteralPath $install -Destination $probeQuarantine
+      }
+      if(-not (Test-Path -LiteralPath $originalBackup -PathType Container) -or
+          (Get-Content -LiteralPath (Join-Path $originalBackup '.unboundvnc-ci-installer-owned') -Raw) -cne $guid) {
+        throw 'Original backup missing or altered; refusing ambiguous same-root rollback.'
+      }
+      Move-Item -LiteralPath $originalBackup -Destination $install
+      Assert-ManifestEqual $originalInstalledManifest (Get-FileManifest $install)
+      $null=Assert-InstallOwned $before
+      Write-Host 'NATIVE SAME-ROOT ROLLBACK PASS: original app restored from GUID-owned backup; entire original installed SHA256 inventory unchanged.'
+      if($probeMarkerAmbiguous) { throw 'Probe marker was missing/altered during rollback; quarantined intact within GUID root, test fails closed.' }
+    }
+  }
+
+  try {
+    Copy-Item -LiteralPath $sameRootLog -Destination $uninstallDat -Force
+    if((Get-FileHash -LiteralPath $uninstallDat -Algorithm SHA256).Hash -cne $sameRootLogHash) {
+      throw 'Same-root hostile log was not installed for actual native negative.'
+    }
+    $null=Assert-InstallOwned $before
+    Assert-NativeUninstallRefusal 'same-AppId same-install-root valid foreign deletion-plan' $before $uninstaller $decoy $decoyHash
+  } finally {
+    if(Test-Path -LiteralPath $install -PathType Container) {
+      Copy-Item -LiteralPath $uninstallDatBackup -Destination $uninstallDat -Force
+    }
+  }
+  Assert-ManifestEqual $originalInstalledManifest (Get-FileManifest $install)
+  $null=Assert-InstallOwned $before
+  Write-Host 'NATIVE SAME-ROOT VALID-PLAN REFUSAL PASS: original native uninstaller preserved all payload/decoy and pristine uninstall-log SHA256.'
+
   $uninstaller=Assert-InstallOwned $before
   $nativeExit=Invoke-NativeUninstallerBounded $uninstaller 'clean expected uninstall'
   if($nativeExit -ne 0) { throw "Native Inno uninstaller returned $nativeExit." }
