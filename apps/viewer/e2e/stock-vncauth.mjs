@@ -195,6 +195,12 @@ async function run() {
       'browser event log must not reveal the ephemeral VNC secret');
     assert.equal(JSON.stringify(browserEvents).includes(wrongPassword), false,
       'browser event log must not reveal the invalid credential either');
+    // The Quick Connect form may have scrolled before the failed session;
+    // capture the persistent failure banner in the actual viewport, unobscured
+    // by temporary disconnect/authentication notifications.
+    await page.locator('#connection-error').scrollIntoViewIfNeeded();
+    await page.waitForFunction(() => !document.querySelector('#toasts .toast'),
+      null, { timeout: 7_000 });
     await page.screenshot({ path: path.join(evidenceDir, 'rejected-password.png') });
     await writeFile(path.join(evidenceDir, 'authentication-result.json'), JSON.stringify({
       fixture: 'independent stock Ubuntu Xtigervnc', securityType: 'VncAuth (loopback only)',
