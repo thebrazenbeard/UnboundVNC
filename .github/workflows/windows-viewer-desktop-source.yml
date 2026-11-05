@@ -1,0 +1,122 @@
+name: Windows desktop viewer packaged-folder prototype
+
+on:
+  pull_request:
+    paths:
+      - 'packaging/viewer-windows/**'
+      - '.github/workflows/windows-viewer-desktop-source.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  windows-desktop-source:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out exact source without persisted credentials
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Node 24 for Vite and packaging
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Install pinned viewer dependencies
+        shell: pwsh
+        run: npm ci --prefix apps/viewer --no-audit --no-fund
+
+      - name: Build production browser renderer
+        shell: pwsh
+        run: npm run build --prefix apps/viewer
+
+      - name: Install pinned desktop packager dependencies
+        shell: pwsh
+        run: npm ci --prefix packaging/viewer-windows --no-audit --no-fund
+
+      - name: Real local gateway HTTP/WS boundary tests
+        shell: pwsh
+        run: node --test packaging/viewer-windows/tests/local-server.test.mjs
+
+      - name: Prepare immutable viewer assets and gateway source
+        shell: pwsh
+        run: node packaging/viewer-windows/scripts/prepare.mjs
+
+      - name: Build unsigned unpacked Windows app folder, never install or publish
+        shell: pwsh
+        run: |
+          $output = Join-Path $env:RUNNER_TEMP 'unboundvnc-viewer-desktop-check'
+          & './packaging/viewer-windows/node_modules/.bin/electron-packager.cmd' packaging/viewer-windows UnboundVNCViewer --platform=win32 --arch=x64 --out=$output --overwrite --asar
+          if ($LASTEXITCODE -ne 0) { throw 'Electron folder packaging failed.' }
+          $app = Join-Path $output 'UnboundVNCViewer-win32-x64'
+          $exe = Join-Path $app 'UnboundVNCViewer.exe'
+          $asar = Join-Path $app 'resources/app.asar'
+          if (-not (Test-Path -LiteralPath $exe -PathType Leaf) -or -not (Test-Path -LiteralPath $asar -PathType Leaf)) {
+            throw 'Unpacked viewer folder lacks its executable or app.asar.'
+          }
+          $hash = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash
+          Write-Host "BUILD ONLY: unsigned unpacked Windows desktop viewer folder; EXE SHA256=$hash; no installation, launch, upload or release."
+
+      - name: Launch temporary desktop viewer and verify gateway stops on exit
+        shell: pwsh
+        run: |
+          if ($env:RUNNER_ENVIRONMENT -ne 'github-hosted') { throw 'Refusing a non-GitHub-hosted runner.' }
+          $exe = Join-Path $env:RUNNER_TEMP 'unboundvnc-viewer-desktop-check/UnboundVNCViewer-win32-x64/UnboundVNCViewer.exe'
+          $receipt = Join-Path $env:RUNNER_TEMP 'unboundvnc-viewer-desktop-smoke.json'
+          $fixtureReceipt = Join-Path $env:RUNNER_TEMP 'unboundvnc-viewer-fixture-port.txt'
+          if (Test-Path -LiteralPath $receipt) { throw 'Refusing stale smoke receipt.' }
+          if (Test-Path -LiteralPath $fixtureReceipt) { throw 'Refusing stale fixture receipt.' }
+          $fixture = Start-Process -FilePath 'node.exe' -ArgumentList 'packaging/viewer-windows/tests/ci-rfb-fixture.mjs' -PassThru
+          $process = $null
+          try {
+            $deadline = [DateTime]::UtcNow.AddSeconds(15)
+            while (-not (Test-Path -LiteralPath $fixtureReceipt) -and [DateTime]::UtcNow -lt $deadline) {
+              Start-Sleep -Milliseconds 100
+            }
+            if (-not (Test-Path -LiteralPath $fixtureReceipt)) { throw 'Synthetic fixture failed to start.' }
+            $port = [int](Get-Content -LiteralPath $fixtureReceipt -Raw)
+            if ($port -lt 1 -or $port -gt 65535) { throw 'Invalid synthetic fixture port.' }
+            $env:UNBOUNDVNC_CI_FIXTURE_PORT = [string]$port
+            $env:UNBOUNDVNC_DESKTOP_CI_SMOKE = '1'
+            $process = Start-Process -FilePath $exe -PassThru
+            if (-not $process.WaitForExit(45000)) { throw 'Desktop app did not exit after CI smoke.' }
+            $errorReceipt = Join-Path $env:RUNNER_TEMP 'unboundvnc-viewer-smoke-error.txt'
+            if (Test-Path -LiteralPath $errorReceipt) {
+              Write-Host "CI-only desktop smoke error: $(Get-Content -LiteralPath $errorReceipt -Raw)"
+            }
+            $fixtureEvents = Join-Path $env:RUNNER_TEMP 'unboundvnc-viewer-fixture-protocol.txt'
+            if (Test-Path -LiteralPath $fixtureEvents) {
+              Write-Host "CI-only synthetic RFB protocol events: $(Get-Content -LiteralPath $fixtureEvents -Raw)"
+            }
+            if ($process.ExitCode -ne 0) { throw "Desktop app exited $($process.ExitCode)." }
+            if (-not (Test-Path -LiteralPath $receipt -PathType Leaf)) { throw 'No renderer/gateway smoke receipt.' }
+            $result = Get-Content -LiteralPath $receipt -Raw | ConvertFrom-Json
+            if ($result.renderer -ne 'loaded' -or $result.session -ne 'synthetic-rfb-connected') { throw 'Renderer/RFB was not verified.' }
+            foreach ($uri in @($result.url, $result.gatewayUrl)) {
+              $endpoint = [uri]$uri
+              if ($endpoint.Host -ne '127.0.0.1') { throw 'Non-loopback endpoint in smoke receipt.' }
+              $client = [Net.Sockets.TcpClient]::new()
+              try {
+                $attempt = $client.ConnectAsync('127.0.0.1', [int]$endpoint.Port)
+                try { $stillOpen = $attempt.Wait(2000) -and $client.Connected } catch { $stillOpen = $false }
+                if ($stillOpen) { throw "Desktop server remained listening after exit: $endpoint" }
+              } finally { $client.Dispose() }
+            }
+            Write-Host 'RUNTIME CI ONLY: desktop EXE launched, dashboard rendered, Quick Connect synthetic RFB 2x2 RGBA pixels matched red/green/blue/white oracle, session disconnected, process exited, both app-owned loopback listeners stopped.'
+          } finally {
+            if ($process -and -not $process.HasExited) { $process.Kill() }
+            if ($fixture -and -not $fixture.HasExited) { $fixture.Kill() }
+            Remove-Item Env:UNBOUNDVNC_DESKTOP_CI_SMOKE -ErrorAction SilentlyContinue
+            Remove-Item Env:UNBOUNDVNC_CI_FIXTURE_PORT -ErrorAction SilentlyContinue
+          }
+
+      - name: Upload only credential-free desktop dashboard screenshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-viewer-dashboard-ci
+          path: ${{ runner.temp }}/unboundvnc-viewer-dashboard.png
+          retention-days: 1
+          if-no-files-found: warn
