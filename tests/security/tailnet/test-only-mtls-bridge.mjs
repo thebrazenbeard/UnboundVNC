@@ -56,6 +56,7 @@ export function createTestOnlyMtlsBridge({
   const server = createHttpsServer({ ...tlsOptions, requestCert: true, rejectUnauthorized: true },
     (req, res) => { res.writeHead(404); res.end(); });
   const sockets = new Set();
+  const upstreamSockets = new Set();
   let active = false;
   let edgePort = null;
 
@@ -79,6 +80,7 @@ export function createTestOnlyMtlsBridge({
     active = true; // One pending or active host session, including identity wait.
     let upstream;
     let expiryTimer;
+    let rejectTimer;
     let stopped = false;
     let abortListener;
     let consentSignal;
@@ -86,24 +88,34 @@ export function createTestOnlyMtlsBridge({
       if (stopped) return;
       stopped = true;
       clearTimeout(expiryTimer);
+      clearTimeout(rejectTimer);
       consentSignal?.removeEventListener('abort', abortListener);
       upstream?.destroy();
       socket.destroy();
       active = false;
+    };
+    const denyAndStop = (code = 403) => {
+      if (stopped) return;
+      if (socket.destroyed) return stop();
+      // Flush the HTTP denial, then *always* destroy both sockets and release
+      // capacity. A half-open peer or held-open bad upstream cannot strand it.
+      socket.end(`HTTP/1.1 ${code} Denied\r\nContent-Length: 0\r\nConnection: close\r\n\r\n`, stop);
+      rejectTimer = setTimeout(stop, 100);
+      rejectTimer.unref();
     };
     socket.once('close', stop);
     socket.once('error', stop);
     const deadline = AbortSignal.timeout(DEADLINE_MS);
     try {
       const certificate = socket.getPeerCertificate();
-      if (!certificate?.fingerprint256) return deny(socket);
+      if (!certificate?.fingerprint256) return denyAndStop();
       const identity = await Promise.race([
         testWhoIs({ socket, certificate }),
         new Promise((_, reject) => deadline.addEventListener('abort', () => reject(new Error('identity deadline')), { once: true })),
       ]);
       if (stopped || identity?.source !== 'TEST_TLS_CERT' ||
           identity.certFingerprint !== certificate.fingerprint256 ||
-          !allowed.has(identity.peerNodeId)) return deny(socket);
+          !allowed.has(identity.peerNodeId)) return denyAndStop();
       const sessionId = randomBytes(32).toString('base64url');
       const consent = await Promise.race([
         testHostConsent({ peerNodeId: identity.peerNodeId, hostId, sessionId, scope: 'view-only' }),
@@ -116,7 +128,7 @@ export function createTestOnlyMtlsBridge({
           consent.epoch < 0 || !Number.isSafeInteger(consent.currentEpoch) ||
           consent.currentEpoch !== consent.epoch || !Number.isFinite(consent.expiresAt) ||
           consent.expiresAt <= now || consent.expiresAt > now + MAX_CONSENT_MS ||
-          !(consent.signal instanceof AbortSignal) || consent.signal.aborted) return deny(socket);
+          !(consent.signal instanceof AbortSignal) || consent.signal.aborted) return denyAndStop();
       consentSignal = consent.signal;
       abortListener = stop;
       consentSignal.addEventListener('abort', stop, { once: true });
@@ -129,13 +141,14 @@ export function createTestOnlyMtlsBridge({
         body: JSON.stringify({ host: '127.0.0.1', port: upstreamPort }),
         signal: deadline,
       });
-      if (issued.status !== 201) return deny(socket);
+      if (issued.status !== 201) return denyAndStop();
       const ticket = await issued.json();
-      if (!/^\/ws\/session\/[A-Za-z0-9_-]{43}$/.test(ticket.wsPath)) return deny(socket);
+      if (!/^\/ws\/session\/[A-Za-z0-9_-]{43}$/.test(ticket.wsPath)) return denyAndStop();
       if (stopped || consentSignal.aborted) return stop();
 
       upstream = connectTcp({ host: '127.0.0.1', port: Number(gateway.port) });
-      upstream.once('close', stop);
+      upstreamSockets.add(upstream);
+      upstream.once('close', () => { upstreamSockets.delete(upstream); stop(); });
       upstream.once('error', stop);
       await new Promise((resolve, reject) => {
         upstream.once('connect', resolve);
@@ -176,10 +189,7 @@ export function createTestOnlyMtlsBridge({
       upstream.pipe(socket);
       socket.resume();
     } catch {
-      if (!stopped) deny(socket);
-    } finally {
-      // A rejected upgrade must not retain the single-session slot.
-      if (!upstream || upstream.destroyed) { active = false; }
+      denyAndStop();
     }
   });
 
@@ -193,8 +203,10 @@ export function createTestOnlyMtlsBridge({
       return edgePort;
     },
     activeSessions: () => Number(active),
+    activeGatewaySockets: () => upstreamSockets.size,
     async close() {
       for (const socket of sockets) socket.destroy();
+      for (const upstream of upstreamSockets) upstream.destroy();
       if (!server.listening) return;
       await new Promise(resolve => server.close(resolve));
     },
