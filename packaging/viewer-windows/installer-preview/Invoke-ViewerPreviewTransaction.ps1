@@ -89,15 +89,19 @@ function Assert-OwnedRoot {
 }
 
 function Assert-AppClean($state) {
-  if ($state.status -ne 'installed' -or -not (Test-Path -LiteralPath $appFolder -PathType Container)) {
-    throw 'Preview app is not installed in its test-owned folder.'
-  }
+  Assert-AppInstalledState $state
   Assert-NoReparse $root
   if ((Test-Path -LiteralPath $pending) -or (Test-Path -LiteralPath $removing) -or
       (Test-Path -LiteralPath $recovery) -or (Test-Path -LiteralPath $receiptTemp)) {
     throw 'Unexpected pending/rollback transaction state.'
   }
   Assert-InventoryEqual $state.inventory (Get-Inventory $appFolder)
+}
+
+function Assert-AppInstalledState($state) {
+  if ($state.status -ne 'installed' -or -not (Test-Path -LiteralPath $appFolder -PathType Container)) {
+    throw 'Preview app is not installed in its test-owned folder.'
+  }
 }
 
 function Assert-AppUnlocked {
@@ -167,12 +171,14 @@ switch ($Operation) {
   }
   'PreviewUninstall' {
     $state = Assert-OwnedRoot
+    Assert-AppInstalledState $state
     Assert-AppUnlocked
     Assert-AppClean $state
     Write-Host "PREVIEW UNINSTALL ONLY (NO WRITES): $($state.inventory.files.Count) exact owned app files eligible for test-only removal; profile/data retained; no user-machine changes."
   }
   'RemoveTest' {
     $state = Assert-OwnedRoot
+    Assert-AppInstalledState $state
     Assert-AppUnlocked
     Assert-AppClean $state
     $moved = $false
