@@ -25,6 +25,7 @@ internal sealed class HostWindow : Form
     private TcpListener? listener;
     private CancellationTokenSource? lifetime;
     private TcpClient? activeClient;
+    private long consentEpoch;
 
     public HostWindow()
     {
@@ -42,16 +43,26 @@ internal sealed class HostWindow : Form
     {
         // This proof of concept must never expose RFB None authentication to a network.
         var server = new TcpListener(IPAddress.Loopback, 5901);
-        server.Start(1);
+        try { server.Start(1); }
+        catch (SocketException ex)
+        {
+            server.Stop();
+            state.Text = $"Cannot start loopback listener on 127.0.0.1:5901 ({ex.SocketErrorCode}).";
+            return;
+        }
         listener = server;
         lifetime = new CancellationTokenSource();
         toggle.Text = "Stop and revoke";
         state.Text = "Loopback 127.0.0.1:5901 only. Each connection requires your approval.";
-        _ = AcceptLoop(server, lifetime.Token);
+        // Never capture screen pixels on the WinForms synchronization context.
+        var token = lifetime.Token;
+        _ = Task.Run(() => AcceptLoop(server, token));
     }
 
     private void Stop()
     {
+        // Revocation becomes visible to the capture worker before socket shutdown.
+        Interlocked.Increment(ref consentEpoch);
         lifetime?.Cancel();
         activeClient?.Close();
         listener?.Stop();
@@ -84,10 +95,13 @@ internal sealed class HostWindow : Form
                 activeClient = client;
                 try
                 {
-                    if (!await ApproveConnection(cancellation)) continue;
+                    if (!await ApproveConnection(cancellation).ConfigureAwait(false)) continue;
+                    var authorizedEpoch = Volatile.Read(ref consentEpoch);
                     using var session = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
                     session.CancelAfter(TimeSpan.FromMinutes(5));
-                    await RfbSession.Run(client, session.Token);
+                    await RfbSession.Run(client, session.Token,
+                        () => !cancellation.IsCancellationRequested &&
+                            Volatile.Read(ref consentEpoch) == authorizedEpoch).ConfigureAwait(false);
                 }
                 catch (Exception ex) when (ex is IOException or SocketException or OperationCanceledException or InvalidDataException or ObjectDisposedException or System.ComponentModel.Win32Exception)
                 {
@@ -99,20 +113,56 @@ internal sealed class HostWindow : Form
         catch (Exception ex) when (ex is OperationCanceledException or ObjectDisposedException or SocketException) { }
     }
 
-    private Task<bool> ApproveConnection(CancellationToken token)
+    private async Task<bool> ApproveConnection(CancellationToken token)
     {
         var result = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        if (token.IsCancellationRequested || IsDisposed) { result.TrySetResult(false); return result.Task; }
-        BeginInvoke((Action)(() =>
+        Form? prompt = null;
+        using var registration = token.Register(() =>
         {
-            if (token.IsCancellationRequested || IsDisposed) { result.TrySetResult(false); return; }
-            var choice = MessageBox.Show(this,
-                "Allow one local, view-only RFB session for at most five minutes?\nNo keyboard, mouse, clipboard, network listener or unattended access is enabled.",
-                "Explicit screen-sharing approval", MessageBoxButtons.YesNo, MessageBoxIcon.Warning,
-                MessageBoxDefaultButton.Button2);
-            result.TrySetResult(choice == DialogResult.Yes && !token.IsCancellationRequested);
-        }));
-        return result.Task;
+            result.TrySetResult(false);
+            try
+            {
+                if (IsHandleCreated && !IsDisposed)
+                    BeginInvoke((Action)(() => { if (prompt is { IsDisposed: false }) prompt.Close(); }));
+            }
+            catch (InvalidOperationException) { /* Form closed while revoking. */ }
+        });
+        if (token.IsCancellationRequested || IsDisposed || !IsHandleCreated) return false;
+        try
+        {
+            BeginInvoke((Action)(() =>
+            {
+                if (token.IsCancellationRequested || IsDisposed) { result.TrySetResult(false); return; }
+                // Non-modal: the local Stop and revoke button remains operational.
+                var dialog = new Form {
+                    Text = "UnboundVNC | Approve local screen sharing",
+                    Width = 510, Height = 190, StartPosition = FormStartPosition.CenterParent,
+                    ShowInTaskbar = false, MinimizeBox = false, MaximizeBox = false
+                };
+                prompt = dialog;
+                var warning = new Label {
+                    Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter,
+                    Text = "Allow one view-only RFB session for at most five minutes?\n" +
+                           "A listener is active on 127.0.0.1:5901 (loopback only).\n" +
+                           "No keyboard, mouse, clipboard or unattended control is enabled."
+                };
+                var buttons = new FlowLayoutPanel {
+                    Dock = DockStyle.Bottom, Height = 45, FlowDirection = FlowDirection.RightToLeft
+                };
+                var reject = new Button { Text = "Reject", Width = 110 };
+                var approve = new Button { Text = "Approve", Width = 110 };
+                reject.Click += (_, _) => { result.TrySetResult(false); dialog.Close(); };
+                approve.Click += (_, _) => { result.TrySetResult(!token.IsCancellationRequested); dialog.Close(); };
+                dialog.FormClosed += (_, _) => result.TrySetResult(false);
+                buttons.Controls.Add(reject);
+                buttons.Controls.Add(approve);
+                dialog.Controls.Add(warning);
+                dialog.Controls.Add(buttons);
+                dialog.Show(this);
+            }));
+        }
+        catch (InvalidOperationException) { result.TrySetResult(false); }
+        return await result.Task.ConfigureAwait(false);
     }
 }
 
@@ -123,9 +173,10 @@ internal static class RfbSession
     private const int MaxWidth = 1280;
     private const int MaxHeight = 720;
 
-    public static async Task Run(TcpClient client, CancellationToken token)
+    public static async Task Run(TcpClient client, CancellationToken token, Func<bool> stillAuthorized)
     {
         // Approval happens before this method, so no protocol or screen bytes are sent first.
+        if (!stillAuthorized()) throw new OperationCanceledException("Local consent revoked");
         using var stream = client.GetStream();
         var desktop = Screen.PrimaryScreen?.Bounds ?? throw new InvalidDataException("No primary screen");
         int width = Math.Min(desktop.Width, MaxWidth), height = Math.Min(desktop.Height, MaxHeight);
@@ -148,6 +199,8 @@ internal static class RfbSession
         while (true)
         {
             token.ThrowIfCancellationRequested();
+            if (!stillAuthorized() || !IsDefaultInputDesktop())
+                throw new OperationCanceledException("Consent revoked or desktop switched");
             switch (await ReadByte(stream, token))
             {
                 case 0: // SetPixelFormat: only the advertised 32bpp little-endian truecolor format.
@@ -169,7 +222,8 @@ internal static class RfbSession
                     int h = BinaryPrimitives.ReadUInt16BigEndian(scratch.AsSpan(7, 2));
                     if (w < 1 || h < 1 || x + w > width || y + h > height || !IsDefaultInputDesktop())
                         throw new InvalidDataException("Unsafe framebuffer request or desktop switch");
-                    await SendRawRectangle(stream, desktop.Left + x, desktop.Top + y, x, y, w, h, token);
+                    await SendRawRectangle(stream, desktop.Left + x, desktop.Top + y, x, y, w, h, token, stillAuthorized);
+                    await Task.Delay(100, token).ConfigureAwait(false); // Bound client-driven capture to at most 10 frames/s.
                     break;
                 case 4: // KeyEvent deliberately discarded; no unattended input.
                     await stream.ReadExactlyAsync(scratch.AsMemory(0, 7), token);
@@ -193,7 +247,7 @@ internal static class RfbSession
         }
     }
 
-    private static async Task SendRawRectangle(NetworkStream stream, int sourceX, int sourceY, int x, int y, int w, int h, CancellationToken token)
+    private static async Task SendRawRectangle(NetworkStream stream, int sourceX, int sourceY, int x, int y, int w, int h, CancellationToken token, Func<bool> stillAuthorized)
     {
         using var frame = new Bitmap(w, h, PixelFormat32bppArgb);
         using (var graphics = Graphics.FromImage(frame)) graphics.CopyFromScreen(sourceX, sourceY, 0, 0, new Size(w, h));
@@ -205,6 +259,10 @@ internal static class RfbSession
                 Marshal.Copy(IntPtr.Add(locked.Scan0, row * locked.Stride), bytes, row * w * 4, w * 4);
         }
         finally { frame.UnlockBits(locked); }
+        // Never transmit a captured frame after revocation or an input-desktop change.
+        token.ThrowIfCancellationRequested();
+        if (!stillAuthorized() || !IsDefaultInputDesktop())
+            throw new OperationCanceledException("Consent revoked or desktop switched during capture");
         // Header: one raw-encoded rectangle; bytes in little-endian B,G,R,A order.
         await stream.WriteAsync(new byte[] { 0, 0, 0, 1 }, token);
         await WriteU16(stream, (ushort)x, token);
@@ -233,7 +291,7 @@ internal static class RfbSession
 
     // Winlogon, lock and UAC secure desktops must never be treated as ordinary capture targets.
     [DllImport("user32.dll", SetLastError = true)] private static extern IntPtr OpenInputDesktop(uint flags, bool inherit, uint access);
-    [DllImport("user32.dll", SetLastError = true)] private static extern bool GetUserObjectInformationW(IntPtr obj, int index, StringBuilder? buffer, uint length, out uint required);
+    [DllImport("user32.dll", EntryPoint = "GetUserObjectInformationW", CharSet = CharSet.Unicode, SetLastError = true)] private static extern bool GetUserObjectInformationW(IntPtr obj, int index, StringBuilder? buffer, uint length, out uint required);
     [DllImport("user32.dll")] private static extern bool CloseDesktop(IntPtr handle);
     private static bool IsDefaultInputDesktop()
     {
