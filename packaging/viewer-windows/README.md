@@ -46,8 +46,8 @@ authorization where required; free tooling does not erase those gates.
   persistence, tunnel or public listener is registered.
 - The gateway retains its **loopback-only target restriction**, which means
   this is **not yet a cross-network remote viewer** even if the form accepts
-  arbitrary hostnames. Native Windows attended-host port 5901 is admitted, but
-  the separate gateway half-close race and security reviews remain blockers.
+  arbitrary hostnames. Native Windows attended-host port 5901 is admitted;
+  real-host interoperability and consent/authentication remain separate gates.
 
 ## Build/test steps (isolated developer/CI only)
 
@@ -76,6 +76,34 @@ disconnects, then requires process exit and both
 app-owned listeners closed. It uploads only a credential-free **dashboard PNG**,
 not an executable or remote framebuffer. This does not prove a real user-host
 session, installed viewer, or secure remote transport.
+
+The separate `windows-viewer-copy-lifecycle.yml` workflow tests a fuller
+**disposable app-folder copy**, still only on a GitHub-hosted Windows runner:
+
+1. Build an unsigned Electron app folder under runner temp; copy the entire
+   folder into a unique GUID-named, ownership-marked runner-temp sandbox and
+   compare SHA256 for **every file**, including hidden/system files, `.exe`
+   and `app.asar`; reject descendant symlinks/junctions/reparse points.
+2. Launch **the copied executable** using a fresh `userData` profile inside
+   that sandbox; start only a synthetic loopback RFB 3.8 fixture. The actual
+   Electron renderer submits Quick Connect, receives a 2×2 RGBX framebuffer,
+   and must report all 16 exact RGBA bytes (red/green/blue/white); an existing
+   canvas element or just a Connected label cannot satisfy this oracle.
+3. Exercise explicit Disconnect back to the dashboard, clean Electron exit,
+   and closure of both app-owned loopback listeners plus the synthetic RFB
+   fixture listener. The sandbox (copied folder, profile, and test receipts) is
+   removed in `finally` after killing any surviving **owned child processes**;
+   **every** original build file must retain the same SHA256/size manifest.
+4. Independently test unsafe cleanup-target rejection and an injected exception
+   immediately after the copy to verify bounded cleanup under failure; test a
+   nested-junction rejection where hosted Windows permits a test-owned junction.
+
+No app folder/binary, profile or framebuffer is uploaded. The test touches no
+user machine, installer registry entries, Windows service, firewall rule,
+startup setting, or real VNC host. Copying a folder and deleting it proves a
+bounded **install-like / uninstall-like lifecycle harness**, **not** an actual
+Windows installer, signed build, clean Win10/11 end-user acceptance, or
+application-data migration/rollback contract.
 
 ## Missing release and usability gates
 
