@@ -31,7 +31,7 @@ jobs:
         run: dotnet run --project tests/host-windows-effect-safety/HostEffectSafetyChecks.csproj --configuration Release -- apps/host-windows/bin/Release/net8.0-windows/UnboundVnc.Host.Windows.dll
       - name: Hosted Windows desktop probe (diagnostic only; no consent simulation)
         run: dotnet run --project tests/host-windows-runner-desktop/RunnerDesktopProbe.csproj --configuration Release -- apps/host-windows/bin/Release/net8.0-windows/UnboundVnc.Host.Windows.exe
-      - name: Ephemeral runner synthetic consent and one Raw RFB pixel (not human approval)
+      - name: Ephemeral runner synthetic consent and 32x24 Raw window oracle (not human approval)
         timeout-minutes: 3
         env:
           UNBOUNDVNC_CI_SYNTHETIC_CONSENT: explicit-runner-only

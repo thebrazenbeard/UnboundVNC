@@ -15,6 +15,13 @@ internal static class Program
     private const string HostTitle = "UnboundVNC | Attended Host Preview";
     private const string ApprovalTitle = "UnboundVNC | Approve local screen sharing";
     private static readonly byte[] Version = Encoding.ASCII.GetBytes("RFB 003.008\n");
+    private const int OracleWidth = 32;
+    private const int OracleHeight = 24;
+    private static readonly Color[] Pattern =
+    {
+        Color.FromArgb(14, 171, 219), Color.FromArgb(219, 46, 88),
+        Color.FromArgb(73, 210, 45), Color.FromArgb(189, 83, 222)
+    };
 
     [STAThread]
     private static int Main(string[] args)
@@ -49,13 +56,56 @@ internal static class Program
                 Location = new Point(bounds.Left + x - 50, bounds.Top + y - 40),
                 Size = new Size(100, 80)
             };
+            int paintCallbacks = 0;
+            marker.Paint += (_, e) =>
+            {
+                paintCallbacks++;
+                PaintFourColorWindow(e.Graphics, marker.ClientSize);
+            };
             marker.Show();
             marker.Activate();
+            marker.Refresh(); // Force our Paint callback before the independent screen oracle.
             Application.DoEvents();
             Thread.Sleep(350);
-            Require(MarkerPixelMatches(marker, bounds.Left + x, bounds.Top + y),
-                "TEST_OWNED_MARKER_PIXEL_MISMATCH");
-            Console.WriteLine("TEST_OWNED_MARKER_PIXEL=PASS");
+            // Windows may enforce a minimum Form client width (136 on the
+            // hosted runner despite Size=100). Use the *actual* painted client
+            // center, not the requested geometry, for screen and RFB sampling.
+            Point center = marker.PointToScreen(new Point(
+                marker.ClientSize.Width / 2, marker.ClientSize.Height / 2));
+            x = center.X - bounds.Left;
+            y = center.Y - bounds.Top;
+            Require(x >= OracleWidth / 2 && y >= OracleHeight / 2 &&
+                x + OracleWidth / 2 <= frameWidth &&
+                y + OracleHeight / 2 <= frameHeight, "TEST_OWNED_WINDOW_OUTSIDE_FRAMEBUFFER");
+            // The oracle is an independently captured 32x24 desktop rectangle
+            // from a runner-owned WinForms window, not bytes manufactured by RFB.
+            byte[]? oracle = null;
+            int[] quadrantMatches = new int[4];
+            string captureFailureType = "NONE";
+            bool oracleReady = WaitUntil(() =>
+            {
+                try
+                {
+                    marker.Refresh(); // No WinForms message pump runs while this STA polls.
+                    oracle = CaptureAndValidatePattern(bounds.Left + x - OracleWidth / 2,
+                        bounds.Top + y - OracleHeight / 2, quadrantMatches);
+                    return true;
+                }
+                catch (Exception ex) { captureFailureType = ex.GetType().Name; return false; }
+            }, TimeSpan.FromSeconds(3));
+            if (!oracleReady || oracle is null)
+            {
+                // Test-owned metadata only; never emit actual desktop pixels.
+                Point actualCenter = marker.PointToScreen(new Point(
+                    marker.ClientSize.Width / 2, marker.ClientSize.Height / 2));
+                Console.WriteLine($"OWNED_WINDOW_PAINT_CALLBACKS={paintCallbacks}");
+                Console.WriteLine($"OWNED_WINDOW_CLIENT_SIZE={marker.ClientSize.Width}x{marker.ClientSize.Height}");
+                Console.WriteLine($"OWNED_WINDOW_CENTER_OFFSET={actualCenter.X - (bounds.Left + x)},{actualCenter.Y - (bounds.Top + y)}");
+                Console.WriteLine($"OWNED_WINDOW_QUADRANT_MATCH_COUNTS={string.Join(",", quadrantMatches)}");
+                Console.WriteLine($"OWNED_WINDOW_CAPTURE_FAILURE_TYPE={captureFailureType}");
+            }
+            Require(oracleReady && oracle is not null, "TEST_OWNED_WINDOW_PATTERN_ORACLE_MISMATCH");
+            Console.WriteLine("TEST_OWNED_32x24_MULTICOLOR_WINDOW_ORACLE=PASS");
 
             Process? host = null;
             try
@@ -86,8 +136,9 @@ internal static class Program
                 ClickOwnedButton(host!, dialog, "Approve");
                 Console.WriteLine("CONSENT_CLICK=SYNTHETIC_CI_APPROVE");
 
-                ValidateOneRawPixel(stream, x, y, frameWidth, frameHeight, marker.BackColor);
-                Console.WriteLine("RFB_3_8_RAW_TEST_OWNED_PIXEL=PASS");
+                ValidateRawPattern(stream, x - OracleWidth / 2, y - OracleHeight / 2,
+                    frameWidth, frameHeight, oracle!);
+                Console.WriteLine("RFB_3_8_RAW_TEST_OWNED_32x24_WINDOW=PASS");
 
                 ClickOwnedButton(host!, window, "Stop and revoke");
                 Require(WaitUntil(() => !IsPort5901Listening(), TimeSpan.FromSeconds(5)),
@@ -158,21 +209,54 @@ internal static class Program
         return okay;
     }
 
-    private static bool MarkerPixelMatches(Form marker, int screenX, int screenY)
+    private static void PaintFourColorWindow(Graphics graphics, Size size)
     {
-        try
+        int halfWidth = size.Width / 2, halfHeight = size.Height / 2;
+        var quadrants = new[]
         {
-            using var bitmap = new Bitmap(1, 1);
-            using (var graphics = Graphics.FromImage(bitmap))
-                graphics.CopyFromScreen(screenX, screenY, 0, 0, new Size(1, 1));
-            return bitmap.GetPixel(0, 0).ToArgb() == marker.BackColor.ToArgb();
+            new Rectangle(0, 0, halfWidth, halfHeight),
+            new Rectangle(halfWidth, 0, size.Width - halfWidth, halfHeight),
+            new Rectangle(0, halfHeight, halfWidth, size.Height - halfHeight),
+            new Rectangle(halfWidth, halfHeight, size.Width - halfWidth, size.Height - halfHeight)
+        };
+        for (int i = 0; i < Pattern.Length; i++)
+        {
+            using var brush = new SolidBrush(Pattern[i]);
+            graphics.FillRectangle(brush, quadrants[i]);
         }
-        catch { return false; }
     }
 
-    private static void ValidateOneRawPixel(NetworkStream stream, int x, int y,
-        int maximumWidth, int maximumHeight, Color expected)
+    private static byte[] CaptureAndValidatePattern(int screenX, int screenY, int[] quadrantMatches)
     {
+        Array.Clear(quadrantMatches);
+        using var bitmap = new Bitmap(OracleWidth, OracleHeight);
+        using (var graphics = Graphics.FromImage(bitmap))
+            graphics.CopyFromScreen(screenX, screenY, 0, 0, new Size(OracleWidth, OracleHeight));
+        var oracle = new byte[OracleWidth * OracleHeight * 3];
+        bool allExpected = true;
+        for (int y = 0; y < OracleHeight; y++)
+        for (int x = 0; x < OracleWidth; x++)
+        {
+            int quadrant = (y < OracleHeight / 2 ? 0 : 2) +
+                (x < OracleWidth / 2 ? 0 : 1);
+            Color expected = Pattern[quadrant];
+            Color actual = bitmap.GetPixel(x, y);
+            if (actual.R == expected.R && actual.G == expected.G && actual.B == expected.B)
+                quadrantMatches[quadrant]++;
+            else allExpected = false;
+            int offset = (y * OracleWidth + x) * 3;
+            oracle[offset] = actual.B;
+            oracle[offset + 1] = actual.G;
+            oracle[offset + 2] = actual.R;
+        }
+        Require(allExpected, "WINDOW_PATTERN_PIXEL_MISMATCH");
+        return oracle;
+    }
+
+    private static void ValidateRawPattern(NetworkStream stream, int x, int y,
+        int maximumWidth, int maximumHeight, byte[] oracle)
+    {
+        Require(oracle.Length == OracleWidth * OracleHeight * 3, "BAD_TEST_ORACLE_LENGTH");
         var version = ReadExact(stream, 12);
         Require(version.SequenceEqual(Version), "WRONG_RFB_VERSION");
         stream.Write(Version);
@@ -192,21 +276,25 @@ internal static class Program
         Require(nameLength <= 512, "UNBOUNDED_RFB_NAME");
         _ = ReadExact(stream, (int)nameLength);
 
-        byte[] request = { 3, 0, (byte)(x >> 8), (byte)x, (byte)(y >> 8), (byte)y, 0, 1, 0, 1 };
+        byte[] request = { 3, 0, (byte)(x >> 8), (byte)x, (byte)(y >> 8), (byte)y,
+            0, OracleWidth, 0, OracleHeight };
         stream.Write(request);
         Require(ReadExact(stream, 4).SequenceEqual(new byte[] { 0, 0, 0, 1 }),
             "INVALID_FRAMEBUFFER_UPDATE_HEADER");
         var rectangle = ReadExact(stream, 12);
         Require(BinaryPrimitives.ReadUInt16BigEndian(rectangle.AsSpan(0, 2)) == x &&
             BinaryPrimitives.ReadUInt16BigEndian(rectangle.AsSpan(2, 2)) == y &&
-            BinaryPrimitives.ReadUInt16BigEndian(rectangle.AsSpan(4, 2)) == 1 &&
-            BinaryPrimitives.ReadUInt16BigEndian(rectangle.AsSpan(6, 2)) == 1 &&
+            BinaryPrimitives.ReadUInt16BigEndian(rectangle.AsSpan(4, 2)) == OracleWidth &&
+            BinaryPrimitives.ReadUInt16BigEndian(rectangle.AsSpan(6, 2)) == OracleHeight &&
             BinaryPrimitives.ReadUInt32BigEndian(rectangle.AsSpan(8, 4)) == 0, "INVALID_RAW_RECTANGLE");
-        var pixel = ReadExact(stream, 4);
+        var pixels = ReadExact(stream, OracleWidth * OracleHeight * 4);
         // Advertised 32bpp/24 depth little-endian true color: B,G,R,X.
-        // Keep the raw bytes entirely in process memory, never log or persist.
-        Require(pixel[0] == expected.B && pixel[1] == expected.G && pixel[2] == expected.R,
-            "RFB_PIXEL_NOT_TEST_OWNED_MARKER");
+        // Compare every one of 768 pixels with the independently captured
+        // on-screen window oracle. Never log or persist either pixel buffer.
+        for (int i = 0; i < OracleWidth * OracleHeight; i++)
+            Require(pixels[i * 4] == oracle[i * 3] &&
+                pixels[i * 4 + 1] == oracle[i * 3 + 1] &&
+                pixels[i * 4 + 2] == oracle[i * 3 + 2], "RFB_WINDOW_PATTERN_MISMATCH");
     }
 
     private static byte[] ReadExact(Stream stream, int count)
