@@ -13,6 +13,7 @@ No source here has been compiled or run on Windows in this PR. The authoring env
 5. Stop sharing, lock the workstation, switch to a secure desktop, and disconnect/reconnect Windows sessions in separate tests. Confirm capture/control does not continue and no stale image is transmitted.
 6. Exercise multiple connections, abnormal disconnection, and rapid start/stop. Start a second host on the same port: the second should display a port error without crashing. While a nonmodal approval prompt is open, press **Stop and revoke** and ensure the prompt closes. Record failures and exact versions before declaring compatibility.
 7. Use a high-rate framebuffer requester to check that capture is limited to approximately 10 FPS, while verifying normal client request/response compatibility.
+8. In a disposable debug copy, inject an exception in the approval or capture worker (never in production). Confirm the listener is closed, the host UI reports an internal stop, and the user can start again. No automatic fault-injection test or live Windows test has run.
 
 ## Explicitly absent
 
