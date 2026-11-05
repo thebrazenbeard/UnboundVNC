@@ -131,7 +131,6 @@ export function createGateway({ port = 6081, host = '127.0.0.1', allowedPorts = 
     }
 
     const rfb = connect({ host: '127.0.0.1', port: ticket.port });
-    rfb.setTimeout(5_000);
     let upgraded = false;
     let closed = false;
     let rejecting = false;
@@ -147,6 +146,11 @@ export function createGateway({ port = 6081, host = '127.0.0.1', allowedPorts = 
     let heartbeatTimer;
     let expectedPong = null;
     let closeTimer;
+    // net.Socket#setTimeout is an *idle* timeout, which a peer can reset by
+    // slowly dripping a partial RFB banner. Reserve scarce admission slots
+    // for at most five seconds of total upstream handshake time instead.
+    const greetingDeadline = setTimeout(forceCleanup, 5_000);
+    greetingDeadline.unref();
     function scheduleCloseDeadline() {
       // ws.end() sends our Close+FIN but does not require the peer to send
       // its own FIN. Keep the connection counted until the socket closes,
@@ -157,6 +161,7 @@ export function createGateway({ port = 6081, host = '127.0.0.1', allowedPorts = 
     function cleanup(closePayload) {
       if (closed) return;
       closed = true;
+      clearTimeout(greetingDeadline);
       clearInterval(heartbeatTimer);
       rfb.destroy();
       if (!rejecting) {
@@ -188,13 +193,8 @@ export function createGateway({ port = 6081, host = '127.0.0.1', allowedPorts = 
     // It must not preempt the outbound WebSocket Close echo.
     rfb.on('error', () => { if (!closed) forceCleanup(); });
     rfb.on('close', () => { if (!closed) forceCleanup(); });
-    rfb.on('timeout', () => { if (!closed) forceCleanup(); });
-    rfb.on('connect', () => {
-      if (closed) return;
-      // Keep TCP timeout active until the server proves it speaks basic RFB.
-    });
     function acceptRfb() {
-      rfb.setTimeout(0);
+      clearTimeout(greetingDeadline);
       const accept = createHash('sha1').update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest('base64');
       ws.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
       upgraded = true;

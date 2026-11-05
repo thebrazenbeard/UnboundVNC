@@ -269,6 +269,34 @@ test('rejects a non-RFB localhost service even on an explicitly allowed port', a
   assert.match(attempt.response, /^HTTP\/1\.1 403/);
 });
 
+test('a trickling RFB banner cannot extend the upstream handshake deadline', async t => {
+  const upstream = createTcpServer(socket => {
+    socket.on('error', () => {});
+    socket.write('R');
+    // Each byte arrives before the ordinary 5-second idle timeout, but the
+    // peer never completes a twelve-byte RFB greeting in that time.
+    const drip = setInterval(() => { if (!socket.destroyed) socket.write('R'); }, 1000);
+    socket.on('close', () => clearInterval(drip));
+  });
+  await new Promise(resolve => upstream.listen(0, '127.0.0.1', resolve));
+  const gateway = createGateway({ port: 0, allowedPorts: [upstream.address().port] });
+  const url = await gateway.listen();
+  const ticket = await (await session({ url, origin: url, port: upstream.address().port })).json();
+  const upstreamAccepted = once(upstream, 'connection');
+  const client = connect({ host: '127.0.0.1', port: Number(new URL(url).port) });
+  client.on('error', () => {});
+  t.after(async () => {
+    client.destroy();
+    await gateway.close();
+    await new Promise(resolve => upstream.close(resolve));
+  });
+  client.write(`GET ${ticket.wsPath} HTTP/1.1\r\nHost: 127.0.0.1:${new URL(url).port}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: ${randomBytes(16).toString('base64')}\r\nOrigin: ${url}\r\n\r\n`);
+  const [serverSocket] = await upstreamAccepted;
+  // The absolute deadline is five seconds; leave scheduling slack without
+  // letting an idle-timeout-only implementation pass.
+  await once(serverSocket, 'close', { signal: AbortSignal.timeout(5800) });
+});
+
 test('quiet authorized sessions survive multiple WebSocket heartbeats', async t => {
   const f = await fixture(t, { heartbeatMs: 150 });
   const ticket = await (await session(f)).json();
