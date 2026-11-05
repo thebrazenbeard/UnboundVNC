@@ -104,7 +104,7 @@ jobs:
                 if ($stillOpen) { throw "Desktop server remained listening after exit: $endpoint" }
               } finally { $client.Dispose() }
             }
-            Write-Host 'RUNTIME CI ONLY: desktop EXE launched, dashboard rendered, Quick Connect negotiated synthetic RFB, session disconnected, process exited, both app-owned loopback listeners stopped.'
+            Write-Host 'RUNTIME CI ONLY: desktop EXE launched, dashboard rendered, Quick Connect synthetic RFB 2x2 RGBA pixels matched red/green/blue/white oracle, session disconnected, process exited, both app-owned loopback listeners stopped.'
           } finally {
             if ($process -and -not $process.HasExited) { $process.Kill() }
             if ($fixture -and -not $fixture.HasExited) { $fixture.Kill() }

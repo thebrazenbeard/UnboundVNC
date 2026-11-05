@@ -89,20 +89,37 @@ if (!app.requestSingleInstanceLock()) {
         const sessionDeadline = Date.now() + 15_000;
         let sessionReady = false;
         let lastView = null;
+        const expectedPixels = [
+          255, 0, 0, 255, 0, 255, 0, 255,
+          0, 0, 255, 255, 255, 255, 255, 255,
+        ];
         while (Date.now() < sessionDeadline && !sessionReady) {
-          const view = await window.webContents.executeJavaScript(`(() => ({
-            status: document.querySelector('#session-status')?.textContent ?? '',
-            canvas: Boolean(document.querySelector('#remote-screen canvas')),
-            error: document.querySelector('#connection-error-message')?.textContent ?? '',
-            sessionHidden: document.querySelector('#session-view')?.hidden,
-            toast: document.querySelector('#toasts')?.lastElementChild?.textContent ?? ''
-          }))()`);
+          const view = await window.webContents.executeJavaScript(`(() => {
+            const canvas = document.querySelector('#remote-screen canvas');
+            const sized = canvas && canvas.width >= 2 && canvas.height >= 2;
+            let pixels = null;
+            if (sized) {
+              try { pixels = Array.from(canvas.getContext('2d').getImageData(0, 0, 2, 2).data); }
+              catch { /* A failed canvas read never counts as verified framebuffer. */ }
+            }
+            return {
+              status: document.querySelector('#session-status')?.textContent ?? '',
+              canvasWidth: canvas?.width ?? 0, canvasHeight: canvas?.height ?? 0,
+              pixels,
+              error: document.querySelector('#connection-error-message')?.textContent ?? '',
+              sessionHidden: document.querySelector('#session-view')?.hidden,
+              toast: document.querySelector('#toasts')?.lastElementChild?.textContent ?? ''
+            };
+          })()`);
           lastView = view;
           if (view.error) throw new Error(`Synthetic loopback viewer connection failed: ${view.error}`);
-          sessionReady = view.status.startsWith('Connected') && view.canvas;
+          sessionReady = view.status.startsWith('Connected') && !view.sessionHidden &&
+            view.canvasWidth >= 2 && view.canvasHeight >= 2 &&
+            Array.isArray(view.pixels) && view.pixels.length === 16 &&
+            view.pixels.every((byte, index) => byte === expectedPixels[index]);
           if (!sessionReady) await new Promise(done => setTimeout(done, 100));
         }
-        if (!sessionReady) throw new Error(`Desktop viewer did not negotiate synthetic RFB: ${JSON.stringify(lastView)}`);
+        if (!sessionReady) throw new Error(`Desktop synthetic RFB 2x2 RGBA pixel oracle failed: ${JSON.stringify(lastView)}`);
         // Explicit user-visible session disconnect; no screenshot of framebuffer.
         await window.webContents.executeJavaScript("document.querySelector('#session-disconnect').click()");
         await writeFile(join(process.env.RUNNER_TEMP, 'unboundvnc-viewer-desktop-smoke.json'), JSON.stringify({

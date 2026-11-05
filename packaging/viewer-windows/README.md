@@ -71,6 +71,7 @@ synthetic loopback RFB WebSocket greeting, and explicit close. The hosted
 Windows workflow additionally launches Electron in a CI-only mode, checks the
 real viewer DOM and local gateway health, drives Quick Connect to the packaging
 test's synthetic loopback RGBX RFB fixture (matching noVNC pixel format),
+requires an actual 2×2 canvas with exact red/green/blue/white RGBA pixels,
 disconnects, then requires process exit and both
 app-owned listeners closed. It uploads only a credential-free **dashboard PNG**,
 not an executable or remote framebuffer. This does not prove a real user-host
