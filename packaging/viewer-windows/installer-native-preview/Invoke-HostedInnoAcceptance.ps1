@@ -116,9 +116,10 @@ try {
 
   $compiler = 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
   if(-not (Test-Path -LiteralPath $compiler -PathType Leaf)) { throw 'Pinned runner Inno Setup 6 compiler unavailable; no unverified download allowed.' }
-  Write-Host "HOSTED BUILD TOOL: $(Get-Item -LiteralPath $compiler | Select-Object -ExpandProperty VersionInfo | Select-Object -ExpandProperty ProductVersion)"
+  Write-Host 'HOSTED BUILD TOOL: verified preinstalled ISCC.exe for Inno Setup 6; version text printed during compilation.'
   $compilerArgs = @(
-    '--no-ide-signtools','--no-signing',
+    # Inno 6 compiler rejects newer --no-signing/--no-ide-signtools switches.
+    # This script has no SignTool directive, and the output signature is verified below.
     "--define=CI_Source=$source","--define=CI_Target=$install",
     "--define=CI_Output=$build","--define=CI_OwnerFile=$ownerFile",
     "--define=CI_Guid=$guid",$iss
