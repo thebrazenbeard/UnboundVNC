@@ -387,10 +387,20 @@ document.getElementById('devices-grid').addEventListener('click', event => {
       break;
     }
     case 'edit': openDeviceDialog(device); break;
-    case 'delete':
+    case 'delete': {
       if (!window.confirm(`Remove ${device.name} from your saved devices? This does not change the remote computer.`)) return;
+      const grid = document.querySelector('#devices-grid');
+      const deleteButtons = [...grid.querySelectorAll('[data-action="delete"]')];
+      const position = deleteButtons.indexOf(button);
+      const neighborId = deleteButtons[position + 1]?.dataset.id ?? deleteButtons[position - 1]?.dataset.id;
       state.devices = state.devices.filter(d => d.id !== device.id);
-      persist(); renderDevices(); break;
+      persist(); renderDevices();
+      // A replaced/removed focused button otherwise sends keyboard users to
+      // body. Continue at the nearest surviving action or the Add control.
+      (findDeviceAction(grid, 'delete', neighborId) ?? grid.querySelector('[data-action="add"]')
+        ?? document.getElementById('list-add')).focus({ preventScroll: true });
+      break;
+    }
     case 'connect': connectTo(device); break;
   }
 });
@@ -400,8 +410,9 @@ document.getElementById('device-form').addEventListener('submit', event => {
   const errorPanel = document.querySelector('#device-form-error');
   try {
     const value = validateDevice(Object.fromEntries(new FormData(form)));
-    if (state.editId) {
-      const index = state.devices.findIndex(d => d.id === state.editId);
+    const editedId = state.editId;
+    if (editedId) {
+      const index = state.devices.findIndex(d => d.id === editedId);
       if (index >= 0) state.devices[index] = { ...state.devices[index], ...value };
     } else {
       state.devices.push({ id: crypto.randomUUID(), ...value, favorite: false, lastConnectedAt: null });
@@ -409,6 +420,8 @@ document.getElementById('device-form').addEventListener('submit', event => {
     persist();
     renderDevices();
     closeDialog('device-dialog');
+    if (editedId) (findDeviceAction(document.querySelector('#devices-grid'), 'edit', editedId)
+      ?? document.getElementById('device-search')).focus({ preventScroll: true });
     notify('Device saved.', 'success');
   } catch (error) {
     errorPanel.textContent = error.message;
