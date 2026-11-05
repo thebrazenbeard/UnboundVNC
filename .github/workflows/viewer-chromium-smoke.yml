@@ -32,8 +32,10 @@ jobs:
         run: npm ci
       - name: Install Playwright test runtime (not bundled in product)
         run: npm install --no-save --package-lock=false --ignore-scripts playwright@1.56.1
-      - name: Install actual Chromium and Linux dependencies
-        run: npx playwright install --with-deps chromium
+      # Stock Ubuntu hosted runners already include Chromium's native libraries.
+      # Avoid apt mirror stalls for optional CJK fonts; browser.launch validates.
+      - name: Install actual Chromium
+        run: npx playwright install chromium
       - name: Execute synthetic browser smoke and capture trace/screenshots
         run: node e2e/smoke.mjs
       - name: Upload genuine browser artifacts, including on test failure
