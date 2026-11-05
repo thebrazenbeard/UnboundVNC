@@ -211,6 +211,10 @@ async function run() {
       JSON.stringify({ desktopToolbar, mobileToolbar }, null, 2));
     assert.deepEqual(mobileToolbar.map(control => control.stableAccessibleName), [true, true, true],
       'View only, Fullscreen and Disconnect must retain their exact desktop accessible names on mobile');
+    await page.getByRole('button', { name: 'View only', exact: true }).click();
+    assert.equal(await page.locator('#session-viewonly').getAttribute('aria-pressed'), 'true',
+      'mobile accessible-name fix must preserve View only activation');
+    await page.getByRole('button', { name: 'View only', exact: true }).click();
     assert.equal(await page.locator('#session-viewonly').getAttribute('aria-pressed'), 'false',
       'scaling and viewport resize must not switch input into view-only');
 
@@ -269,7 +273,7 @@ async function run() {
       unexpectedDisconnectBanner: true, retryConnected: true,
       noCredentialLikeBrowserStorage: true, viewOnlyPreserved: true,
     }, null, 2));
-    await page.locator('#session-disconnect').click();
+    await page.getByRole('button', { name: 'Disconnect', exact: true }).click();
     assert.equal(await page.locator('#session-view').isVisible(), false, 'disconnect returns to dashboard');
     assert.equal(await page.locator('#connection-error').isVisible(), false,
       'explicit user Disconnect must not be misclassified as remote session failure');
