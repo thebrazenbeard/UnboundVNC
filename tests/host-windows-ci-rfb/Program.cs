@@ -56,7 +56,12 @@ internal static class Program
                 Location = new Point(bounds.Left + x - 50, bounds.Top + y - 40),
                 Size = new Size(100, 80)
             };
-            marker.Paint += (_, e) => PaintFourColorWindow(e.Graphics, marker.ClientSize);
+            int paintCallbacks = 0;
+            marker.Paint += (_, e) =>
+            {
+                paintCallbacks++;
+                PaintFourColorWindow(e.Graphics, marker.ClientSize);
+            };
             marker.Show();
             marker.Activate();
             marker.Refresh(); // Force our Paint callback before the independent screen oracle.
@@ -65,17 +70,31 @@ internal static class Program
             // The oracle is an independently captured 32x24 desktop rectangle
             // from a runner-owned WinForms window, not bytes manufactured by RFB.
             byte[]? oracle = null;
-            Require(WaitUntil(() =>
+            int[] quadrantMatches = new int[4];
+            string captureFailureType = "NONE";
+            bool oracleReady = WaitUntil(() =>
             {
                 try
                 {
                     marker.Refresh(); // No WinForms message pump runs while this STA polls.
                     oracle = CaptureAndValidatePattern(bounds.Left + x - OracleWidth / 2,
-                        bounds.Top + y - OracleHeight / 2);
+                        bounds.Top + y - OracleHeight / 2, quadrantMatches);
                     return true;
                 }
-                catch { return false; }
-            }, TimeSpan.FromSeconds(3)) && oracle is not null, "TEST_OWNED_WINDOW_PATTERN_ORACLE_MISMATCH");
+                catch (Exception ex) { captureFailureType = ex.GetType().Name; return false; }
+            }, TimeSpan.FromSeconds(3));
+            if (!oracleReady || oracle is null)
+            {
+                // Test-owned metadata only; never emit actual desktop pixels.
+                Point actualCenter = marker.PointToScreen(new Point(
+                    marker.ClientSize.Width / 2, marker.ClientSize.Height / 2));
+                Console.WriteLine($"OWNED_WINDOW_PAINT_CALLBACKS={paintCallbacks}");
+                Console.WriteLine($"OWNED_WINDOW_CLIENT_SIZE={marker.ClientSize.Width}x{marker.ClientSize.Height}");
+                Console.WriteLine($"OWNED_WINDOW_CENTER_OFFSET={actualCenter.X - (bounds.Left + x)},{actualCenter.Y - (bounds.Top + y)}");
+                Console.WriteLine($"OWNED_WINDOW_QUADRANT_MATCH_COUNTS={string.Join(",", quadrantMatches)}");
+                Console.WriteLine($"OWNED_WINDOW_CAPTURE_FAILURE_TYPE={captureFailureType}");
+            }
+            Require(oracleReady && oracle is not null, "TEST_OWNED_WINDOW_PATTERN_ORACLE_MISMATCH");
             Console.WriteLine("TEST_OWNED_32x24_MULTICOLOR_WINDOW_ORACLE=PASS");
 
             Process? host = null;
@@ -197,25 +216,30 @@ internal static class Program
         }
     }
 
-    private static byte[] CaptureAndValidatePattern(int screenX, int screenY)
+    private static byte[] CaptureAndValidatePattern(int screenX, int screenY, int[] quadrantMatches)
     {
+        Array.Clear(quadrantMatches);
         using var bitmap = new Bitmap(OracleWidth, OracleHeight);
         using (var graphics = Graphics.FromImage(bitmap))
             graphics.CopyFromScreen(screenX, screenY, 0, 0, new Size(OracleWidth, OracleHeight));
         var oracle = new byte[OracleWidth * OracleHeight * 3];
+        bool allExpected = true;
         for (int y = 0; y < OracleHeight; y++)
         for (int x = 0; x < OracleWidth; x++)
         {
-            Color expected = Pattern[(y < OracleHeight / 2 ? 0 : 2) +
-                (x < OracleWidth / 2 ? 0 : 1)];
+            int quadrant = (y < OracleHeight / 2 ? 0 : 2) +
+                (x < OracleWidth / 2 ? 0 : 1);
+            Color expected = Pattern[quadrant];
             Color actual = bitmap.GetPixel(x, y);
-            Require(actual.R == expected.R && actual.G == expected.G && actual.B == expected.B,
-                "WINDOW_PATTERN_PIXEL_MISMATCH");
+            if (actual.R == expected.R && actual.G == expected.G && actual.B == expected.B)
+                quadrantMatches[quadrant]++;
+            else allExpected = false;
             int offset = (y * OracleWidth + x) * 3;
             oracle[offset] = actual.B;
             oracle[offset + 1] = actual.G;
             oracle[offset + 2] = actual.R;
         }
+        Require(allExpected, "WINDOW_PATTERN_PIXEL_MISMATCH");
         return oracle;
     }
 
