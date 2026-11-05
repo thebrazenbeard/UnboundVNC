@@ -37,6 +37,9 @@ function validClosePayload(payload) {
 function sendJson(res, status, value) {
   res.writeHead(status, {
     'content-type': 'application/json; charset=utf-8',
+    // API replies are tiny; do not let completed health requests repeatedly
+    // re-arm a keep-alive socket and monopolize the pending HTTP slot pool.
+    connection: 'close',
     'cache-control': 'no-store',
     'x-content-type-options': 'nosniff',
     'content-security-policy': "default-src 'none'; frame-ancestors 'none'",
@@ -101,8 +104,8 @@ export function createGateway({ port = 6081, host = '127.0.0.1', allowedPorts = 
   }
   const server = createServer(async (req, res) => {
     const httpSocket = req.socket;
-    // Finish each tiny HTTP API transaction inside the deadline and re-arm
-    // it for a possible next request over the same keep-alive connection.
+    // Defense in depth for any future handler that leaves HTTP keep-alive
+    // active; today's JSON API always sends Connection: close.
     res.once('finish', () => {
       if (!httpSocket.destroyed && !upgradedSockets.has(httpSocket)) armHeaderDeadline(httpSocket);
     });
