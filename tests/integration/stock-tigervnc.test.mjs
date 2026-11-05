@@ -56,17 +56,27 @@ async function assertLoopbackListener(port) {
 }
 
 async function waitForRfbSessionRelease(port) {
-  const hexPort = port.toString(16).toUpperCase().padStart(4, '0');
   const deadline = Date.now() + TIMEOUT_MS;
   while (Date.now() < deadline) {
-    const tables = await Promise.all(['/proc/net/tcp', '/proc/net/tcp6'].map(file => readFile(file, 'utf8')));
-    const established = tables.flatMap(table => table.split('\n').slice(1).map(line => line.trim().split(/\s+/)))
-      .filter(fields => fields[3] === '01' &&
-        (fields[1]?.endsWith(`:${hexPort}`) || fields[2]?.endsWith(`:${hexPort}`)));
+    const established = await establishedRfbEndpoints(port);
     if (established.length === 0) return;
     await new Promise(resolve => setTimeout(resolve, 100));
   }
-  throw new Error('RFB TCP session remained ESTABLISHED after downstream disconnect');
+  throw new Error(`RFB TCP session remained ESTABLISHED after downstream disconnect: ${JSON.stringify(await establishedRfbEndpoints(port))}`);
+}
+
+async function establishedRfbEndpoints(port) {
+  const hexPort = port.toString(16).toUpperCase().padStart(4, '0');
+  const tables = await Promise.all(['/proc/net/tcp', '/proc/net/tcp6'].map(file => readFile(file, 'utf8')));
+  return tables.flatMap((table, index) => table.split('\n').slice(1).map(line => ({
+    protocol: index === 0 ? 'tcp4' : 'tcp6', fields: line.trim().split(/\s+/),
+  }))).filter(({ fields }) => fields[3] === '01' &&
+    (fields[1]?.endsWith(`:${hexPort}`) || fields[2]?.endsWith(`:${hexPort}`)))
+    .map(({ protocol, fields }) => ({ protocol,
+      local: fields[1], remote: fields[2],
+      localPort: parseInt(fields[1].split(':')[1], 16),
+      remotePort: parseInt(fields[2].split(':')[1], 16),
+    }));
 }
 
 async function startTiger(t, { securityType = 'None', passwordFile = null } = {}) {
@@ -383,3 +393,23 @@ test('stock TigerVNC → actual loopback gateway: RFB framebuffer and disconnect
   await waitForRfbSessionRelease(tiger.port);
   console.log('RFB stock lifecycle: both downstream sockets closed, upstream TCP sessions released, second fresh-ticket framebuffer passed');
 });
+
+test('diagnostic: abrupt downstream TCP close releases stock RFB upstream connection',
+  { skip: !RUN, timeout: 30_000 }, async t => {
+    const tiger = await startTiger(t);
+    const baseline = await establishedRfbEndpoints(tiger.port);
+    console.log(`RFB abrupt diagnostic readiness-probe baseline=${JSON.stringify(baseline)}`);
+    assert.deepEqual(baseline, [], 'readiness probe itself left an ESTABLISHED RFB session');
+    const gateway = createGateway({ port: 0, allowedPorts: [tiger.port] });
+    const origin = await gateway.listen();
+    t.after(() => gateway.close());
+    const session = await rfbSession(origin, tiger.port, t);
+    const active = await establishedRfbEndpoints(tiger.port);
+    console.log(`RFB abrupt diagnostic before client destruction=${JSON.stringify(active)}`);
+    assert.ok(active.length >= 2, 'expected both client-side and server-side established loopback TCP endpoints');
+    const closed = once(session.socket, 'close', { signal: AbortSignal.timeout(TIMEOUT_MS) });
+    session.socket.destroy();
+    await closed;
+    await waitForRfbSessionRelease(tiger.port);
+    console.log('RFB abrupt diagnostic upstream TCP connection released without TigerVNC shutdown');
+  });
