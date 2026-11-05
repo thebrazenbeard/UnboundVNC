@@ -141,10 +141,14 @@ async function startBackend(t, backend) {
   // RFB scraping servers often composite the *software pointer* into Raw
   // pixels. XWD omits that pointer. Xvfb starts it at the exact framebuffer
   // centre (24,16), which caused reproducible cross-server mismatches there.
-  // An original 1x1 fully transparent XBM cursor makes both oracles identical.
+  // An original 16x16 fully transparent XBM cursor makes the oracles identical.
   const cursorDir = await mkdtemp(join(tmpdir(), 'unboundvnc-x11-cursor-'));
   const cursor = join(cursorDir, 'transparent.xbm');
-  await writeFile(cursor, '#define invisible_width 1\n#define invisible_height 1\nstatic unsigned char invisible_bits[] = { 0x00 };\n',
+  const transparentXbm = '#define transparent_width 16\n#define transparent_height 16\n' +
+    '#define transparent_x_hot 0\n#define transparent_y_hot 0\n' +
+    'static unsigned char transparent_bits[] = {\n' +
+    Array.from({ length: 4 }, () => '  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00').join(',\n') + '\n};\n';
+  await writeFile(cursor, transparentXbm,
     { mode: 0o600, flag: 'wx' });
   t.after(async () => { await unlink(cursor); await rmdir(cursorDir); });
   const port = await unusedPort();
