@@ -153,14 +153,13 @@ async function startBackend(t, backend) {
   const scraper = launch(t, command, args);
   await awaitPort(port, scraper);
   assert.deepEqual(await listenerAndConnections(port), [], 'RFB readiness probe did not disconnect');
-  // Repaint after the scraper subscribes to the X display; force an exposure
-  // and verify the painted pixels using a separate X11 screen-dump utility.
+  // Repaint after the scraper subscribes to the X display and allow its
+  // asynchronous polling/XDamage cycle to settle. `xrefresh` deliberately
+  // flashes an overlay window and can contaminate a screenshot mid-frame.
   const repaint = spawnSync('xsetroot', ['-display', display, '-solid', '#28914c'],
     { encoding: 'utf8', timeout: 3000 });
   assert.equal(repaint.status, 0, 'Xvfb repaint failed');
-  const refresh = spawnSync('xrefresh', ['-display', display], { encoding: 'utf8', timeout: 3000 });
-  assert.equal(refresh.status, 0, 'X11 exposure refresh failed');
-  await delay(300);
+  await delay(1200);
   assertX11RootPixels(display);
   return port;
 }
