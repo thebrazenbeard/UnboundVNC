@@ -2,7 +2,13 @@
 
 This is a **view-only attended proof of concept**, not a production remote-access service. It targets .NET 8 WinForms on Windows, serves RFB 3.8 on **127.0.0.1:5901 only**, asks the logged-in local user to approve each connection before any RFB protocol or framebuffer bytes are sent, and limits each approved session to five minutes. The operator can stop sharing. Windows lock/disconnect and nondefault input desktop checks cause the connection to stop. A post-capture desktop/consent-epoch check attempts to prevent sending stale frames after revocation; this is not an atomic guarantee against a transition during network writes.
 
-The attended host has passed a hosted Windows .NET 8 Release **build** in previous draft work, but no real interactive Windows host session has been performed. Protocol interoperability, capture, consent visibility, native input, crash handling, and lock/UAC behavior remain **runtime-unverified**. The current draft's input-policy compile and isolated checks require their own exact-head Windows Actions receipt; a build does not establish real remote-desktop behavior.
+The attended host has passed hosted Windows .NET 8 Release **build** and source/mocked checks in previous draft work, but no real human-attended Windows RFB session has been performed. Protocol interoperability, actual host framebuffer transfer, consent visibility, native input, crash handling, and lock/UAC behavior remain **runtime-unverified**. A successful build does not establish real remote-desktop behavior.
+
+## Hosted Windows GUI diagnostic (consent not simulated)
+
+The `tests/host-windows-runner-desktop` project is an isolated Windows Actions **diagnostic**, not an attended RFB qualification. It checks whether the ephemeral Windows runner has an active interactive `WinSta0/Default` console desktop; if absent, it reports `BLOCKED_NONINTERACTIVE_DESKTOP`, skips the host, and exits successfully only as a diagnostic (not a runtime PASS). When present, it requires a real one-pixel `CopyFromScreen` match against an intentionally solid-colored **test-owned form**, then launches the actual view-only host WinForms executable as its own child, verifies the stopped-by-default window and **Start local preview** button through read-only metadata, and checks for no newly created port 5901 listener. Capture mismatch fails the diagnostic and prevents launching the host. The probe closes only its own child and never saves/logs pixel values or images.
+
+It never clicks Start or Approve, injects keyboard/pointer input, initiates an RFB handshake, alters runner policy, touches a production host, or claims live screen sharing. The workflow prints `RFB_FRAMEBUFFER=NOT_TESTED_NO_HUMAN_CONSENT`. Neither a GUI-launch PASS nor test-form screen capture proves Win10/11 user-workstation parity, UAC/lock behavior, consent UX, or framebuffer bytes following a real human-approved session.
 
 ## Disabled local input policy spike
 
