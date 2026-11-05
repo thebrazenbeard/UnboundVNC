@@ -204,6 +204,9 @@ function hideSession() {
   document.querySelector('#remote-screen').replaceChildren();
   document.querySelector('#session-focus-remote').disabled = true;
   closeDialog('credentials-dialog');
+  // A user may cancel VncAuth after typing but before submitting. Drop both
+  // fields on every session exit so the next prompt cannot expose stale input.
+  document.querySelector('#credentials-form').reset();
   closeDialog('identity-dialog');
   document.querySelector('#identity-approve').disabled = true;
   document.querySelector('#identity-approve').hidden = false;
