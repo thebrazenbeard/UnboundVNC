@@ -5,8 +5,11 @@ import { connect as connectTcp } from 'node:net';
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createRequire } from 'node:module';
 import { createGateway } from '../../../apps/gateway/src/server.mjs';
 import { startLocalViewer } from '../local-server.mjs';
+const require = createRequire(import.meta.url);
+const { isTrustedResource, isTrustedNavigation } = require('../resource-policy.cjs');
 
 let scratch;
 let wrapper;
@@ -92,4 +95,24 @@ test('source desktop entry has sandboxed renderer and no background service regi
     assert.ok(source.includes(part), part);
   }
   assert.doesNotMatch(source, /New-Service|Start-Service|New-NetFirewallRule|app\.setLoginItemSettings|autoUpdater/);
+});
+
+test('Electron resource policy permits only matching HTTP and WebSocket loopback authority', () => {
+  const trust = 'http://127.0.0.1:49123';
+  assert.equal(isTrustedResource('http://127.0.0.1:49123/assets/viewer.js', trust), true);
+  assert.equal(isTrustedResource('ws://127.0.0.1:49123/ws/session/token', trust), true);
+  for (const unsafe of [
+    'ws://127.0.0.1:49124/ws/session/token',
+    'ws://evil.example:49123/ws/session/token',
+    'wss://127.0.0.1:49123/ws/session/token',
+    'http://127.0.0.1:49124/',
+    'https://127.0.0.1:49123/',
+    'http://127.0.0.1:49123.evil.example/',
+    'file:///C:/sensitive.txt',
+    'data:text/html,evil',
+  ]) assert.equal(isTrustedResource(unsafe, trust), false, unsafe);
+  assert.equal(isTrustedNavigation('http://127.0.0.1:49123/#devices', trust), true);
+  assert.equal(isTrustedNavigation('http://127.0.0.1:49123/other-page', trust), false);
+  assert.equal(isTrustedNavigation('http://127.0.0.1:49123.evil.example/', trust), false);
+  assert.equal(isTrustedNavigation('ws://127.0.0.1:49123/', trust), false);
 });

@@ -2,6 +2,7 @@
 const { app, BrowserWindow, session } = require('electron');
 const { join } = require('node:path');
 const { pathToFileURL } = require('node:url');
+const { isTrustedResource, isTrustedNavigation } = require('./resource-policy.cjs');
 
 let window;
 let local;
@@ -24,10 +25,7 @@ if (!app.requestSingleInstanceLock()) {
       const trustedOrigin = new URL(local.url).origin;
       session.defaultSession.setPermissionRequestHandler((_wc, _permission, done) => done(false));
       session.defaultSession.webRequest.onBeforeRequest((details, done) => {
-        try {
-          const url = new URL(details.url);
-          done({ cancel: !((url.protocol === 'http:' || url.protocol === 'ws:') && url.origin === trustedOrigin) });
-        } catch { done({ cancel: true }); }
+        done({ cancel: !isTrustedResource(details.url, trustedOrigin) });
       });
       window = new BrowserWindow({
         title: 'UnboundVNC Viewer — Preview', width: 1180, height: 800,
@@ -36,7 +34,7 @@ if (!app.requestSingleInstanceLock()) {
       });
       window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
       window.webContents.on('will-navigate', (event, url) => {
-        if (!url.startsWith(trustedOrigin + '/')) event.preventDefault();
+        if (!isTrustedNavigation(url, trustedOrigin)) event.preventDefault();
       });
       window.webContents.on('will-attach-webview', event => event.preventDefault());
       await window.loadURL(local.url);
