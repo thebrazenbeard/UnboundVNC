@@ -58,13 +58,14 @@ export function createFakeTailnetAdmission({ now = () => Date.now() } = {}) {
     if (!validFakeWhoIsAndTls(observed, route)) return deny('UNVERIFIED_PEER_OR_TLS');
     if (tickets.size >= MAX_TICKETS) return deny('TICKET_CAPACITY');
     const id = randomBytes(32).toString('base64url');
+    const expiresAt = now() + TICKET_MS;
     tickets.set(id, {
       peerNodeId: observed.peerNodeId,
       serviceDns: route.serviceDns,
       hostNodeId: route.hostNodeId,
-      expiresAt: now() + TICKET_MS,
+      expiresAt,
     });
-    return { ok: true, ticketId: id, expiresAt: now() + TICKET_MS };
+    return { ok: true, ticketId: id, expiresAt };
   }
 
   function consume({ ticketId, route, observed } = {}) {
