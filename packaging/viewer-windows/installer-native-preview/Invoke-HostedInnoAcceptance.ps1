@@ -121,7 +121,7 @@ try {
   # --no-ide-signtools and --define options.
   $helpText=(& $compiler '/?' 2>&1 | Out-String)
   Write-Host "HOSTED INNO 6 ACTUAL /? HELP:`n$helpText"
-  if($helpText -notmatch '(?i)(/d|-d)') { throw 'Installed Inno compiler help did not advertise ISPP short /D definitions.' }
+  if($helpText -notmatch '(?mi)^\s*/D<name>') { throw 'Installed Inno compiler help did not advertise ISPP /D short definitions.' }
   $compilerArgs = @(
     # Pin the older Inno 6 short -d syntax. Its installed ISCC.exe rejects
     # newer --define / --no-signing / --no-ide-signtools switches.

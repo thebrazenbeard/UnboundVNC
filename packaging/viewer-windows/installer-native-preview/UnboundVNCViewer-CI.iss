@@ -24,7 +24,8 @@ DefaultDirName={#CI_Target}
 OutputDir={#CI_Output}
 OutputBaseFilename=UnboundVNCViewer-CI-ONLY-Setup
 PrivilegesRequired=lowest
-PrivilegesRequiredOverridesAllowed=none
+; Omit PrivilegesRequiredOverridesAllowed: documented default is blank, i.e.
+; neither 'commandline' nor 'dialog' privilege override is permitted.
 UsePreviousAppDir=no
 CreateUninstallRegKey=no
 UpdateUninstallLogAppName=no
