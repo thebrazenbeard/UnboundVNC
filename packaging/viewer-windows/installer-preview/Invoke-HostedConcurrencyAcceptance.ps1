@@ -62,6 +62,43 @@ function Remove-OwnedTestRoot([string]$root) {
   if (Test-Path -LiteralPath $root) { throw 'Owned test root still present after cleanup.' }
 }
 
+# Child output belongs to this GUID-owned hosted test only. It is never
+# uploaded as an artifact and is printed (bounded) solely on premature exit.
+$childLogNonce = [guid]::NewGuid().ToString('N')
+$childStdout = Join-Path $runner ("unboundvnc-preview-child-$childLogNonce.stdout.txt")
+$childStderr = Join-Path $runner ("unboundvnc-preview-child-$childLogNonce.stderr.txt")
+foreach($log in @($childStdout,$childStderr)) {
+  if (Test-Path -LiteralPath $log) { throw 'Refusing pre-existing child diagnostic log.' }
+}
+
+function Write-ApplyChildFailure {
+  Write-Host "APPLY_CHILD_EXIT_CODE=$($holder.ExitCode)"
+  $phase = 'absent'
+  if (Test-Path -LiteralPath $journal -PathType Leaf) {
+    try { $phase = (Get-Content -LiteralPath $journal -Raw | ConvertFrom-Json).phase }
+    catch { $phase = 'invalid' }
+  }
+  Write-Host "APPLY_CHILD_JOURNAL_PHASE=$phase"
+  foreach($entry in @(@{ name='STDOUT'; path=$childStdout }, @{ name='STDERR'; path=$childStderr })) {
+    if (-not (Test-Path -LiteralPath $entry.path -PathType Leaf)) { continue }
+    $raw = [IO.File]::ReadAllText($entry.path)
+    $tail = $raw.Substring([Math]::Max(0,$raw.Length - 4096))
+    Write-Host "APPLY_CHILD_$($entry.name)_TAIL_BEGIN (max 4096 chars)"
+    Write-Host $tail
+    Write-Host "APPLY_CHILD_$($entry.name)_TAIL_END"
+  }
+}
+
+function Remove-OwnedChildLogs {
+  foreach($log in @($childStdout,$childStderr)) {
+    if ([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($log)) -ine $runner -or
+        [IO.Path]::GetFileName($log) -cnotmatch '^unboundvnc-preview-child-[0-9a-f]{32}\.(stdout|stderr)\.txt$') {
+      throw 'Unsafe child diagnostic log cleanup.'
+    }
+    if (Test-Path -LiteralPath $log) { Remove-Item -LiteralPath $log -Force }
+  }
+}
+
 # Defect reproduction: original RecoverTest trusted a completed journal while
 # the actual ApplyTest owner was alive and paused. It then deleted the live root.
 $root = New-TestRoot
@@ -70,12 +107,15 @@ try {
   $holder = Start-Process -FilePath (Get-Command pwsh).Source -ArgumentList @(
     '-NoProfile','-NonInteractive','-File',$transaction,'-Operation','ApplyTest',
     '-SandboxRoot',$root,'-CrashPauseAfterCopy'
-  ) -PassThru
+  ) -PassThru -RedirectStandardOutput $childStdout -RedirectStandardError $childStderr
   $journal = Join-Path $root '.unboundvnc-viewer-preview-journal.json'
   $deadline = [DateTime]::UtcNow.AddSeconds(40)
   $ready = $false
   while([DateTime]::UtcNow -lt $deadline) {
-    if($holder.HasExited) { throw 'ApplyTest child exited before held-copy checkpoint.' }
+    if($holder.HasExited) {
+      Write-ApplyChildFailure
+      throw 'ApplyTest child exited before held-copy checkpoint.'
+    }
     if(Test-Path -LiteralPath $journal) {
       try { $ready = (Get-Content -LiteralPath $journal -Raw | ConvertFrom-Json).phase -eq 'pending-verified' }
       catch { $ready = $false }
@@ -105,7 +145,8 @@ try {
   Write-Host 'LIVE APPLY SERIALIZATION PASS: all three competing operations refused until exact owner PID was killed; then verified recovery completed.'
 } finally {
   Stop-Owned $holder
-  Remove-OwnedTestRoot $root
+  try { Remove-OwnedTestRoot $root }
+  finally { Remove-OwnedChildLogs }
 }
 
 if($Mode -eq 'Verify') {
