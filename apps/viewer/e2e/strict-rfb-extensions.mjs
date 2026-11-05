@@ -132,20 +132,25 @@ async function run() {
       return pixel[0] === 255 && pixel[1] === 0 && pixel[2] === 0;
     }, null, { timeout: 10_000 });
 
-    // DesktopSize must be followed by a real 4x3 Raw rectangle, not merely a
-    // canvas resize. The fixture now accepts the client's new request bounds.
+    // RFC 6143 §7.8.2 requires DesktopSize to be the LAST rectangle in a
+    // FramebufferUpdate. Only after noVNC requests the new 4x3 framebuffer
+    // may this strict fixture send an independent full Raw update.
+    await eventually(() => framebufferRequests(connection).length >= 2,
+      'initial incremental framebuffer request');
     fixture.resize(WIDTH, HEIGHT);
     const oldRequests = framebufferRequests(connection).length;
-    connection.socket.write(framebufferUpdate(
-      rectangle(DESKTOP_SIZE, WIDTH, HEIGHT),
-      rectangle(RAW, WIDTH, HEIGHT, pixels(WIDTH, HEIGHT, 0xcc, 0x44, 0x88))));
-    samples.push(await waitForCanvas(page, WIDTH, HEIGHT, [0xcc, 0x44, 0x88], 'DesktopSize + Raw'));
-    await expectNextRequest(connection, oldRequests, 'after DesktopSize + Raw');
+    connection.socket.write(framebufferUpdate(rectangle(DESKTOP_SIZE, WIDTH, HEIGHT)));
+    await expectNextRequest(connection, oldRequests, 'after terminal DesktopSize');
     const postResizeRequests = framebufferRequests(connection).length;
+    connection.socket.write(framebufferUpdate(rectangle(RAW, WIDTH, HEIGHT,
+      pixels(WIDTH, HEIGHT, 0xcc, 0x44, 0x88))));
+    samples.push(await waitForCanvas(page, WIDTH, HEIGHT, [0xcc, 0x44, 0x88], 'DesktopSize then Raw'));
+    await expectNextRequest(connection, postResizeRequests, 'after Raw on resized desktop');
+    const postRawRequests = framebufferRequests(connection).length;
     connection.socket.write(framebufferUpdate(rectangle(HEXTILE, WIDTH, HEIGHT,
       Buffer.concat([Buffer.from([1]), pixels(WIDTH, HEIGHT, 0x19, 0x87, 0xde)]))));
     samples.push(await waitForCanvas(page, WIDTH, HEIGHT, [0x19, 0x87, 0xde], 'Hextile Raw tile'));
-    await expectNextRequest(connection, postResizeRequests, 'after Hextile');
+    await expectNextRequest(connection, postRawRequests, 'after Hextile');
     const postHextileRequests = framebufferRequests(connection).length;
     connection.socket.write(framebufferUpdate(rectangle(TIGHT, WIDTH, HEIGHT,
       Buffer.from([0x80, 0x11, 0xb4, 0x66]))));
