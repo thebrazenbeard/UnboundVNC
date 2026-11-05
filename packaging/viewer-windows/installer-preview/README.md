@@ -17,6 +17,21 @@ This is not the actual Windows user's `%LOCALAPPDATA%`, and it intentionally doe
 
 The hosted acceptance performs both negative and positive paths, including an actual Electron EXE launch from the staged destination: synthetic loopback RFB 3.8 RGBX 2×2 renderer canvas must match all 16 RGBA bytes red/green/blue/white, explicit Disconnect, app and gateway exit, and all three known loopback ports closed. It then exercises unknown-file, exclusive file-handle, nested junction, ownership and rollback guards. The test harness alone finally deletes the GUID-owned ephemeral sandbox and retained synthetic profile; `RemoveTest` itself intentionally **does not** delete profile/data or arbitrary unknown files.
 
+Windows Electron child processes or background file scanners may briefly retain
+EXE mappings after the top-level viewer PID exits. The hosted acceptance now
+waits at most 45 seconds for three consecutive samples showing no matching
+app-path Electron descendants, no inaccessible same-name PIDs, no exclusively
+locked installed files, and no known loopback listeners. It does **not** kill
+unknown processes or weaken the transaction's independent locked-file refusal;
+if quiescence cannot be demonstrated, uninstall and locked-root cleanup fail
+closed. Negative cases also require their *exact expected refusal reason*, so
+an incidental EXE lock cannot masquerade as an unknown-file or app.asar guard.
+The hosted test also acquires an exclusive handle on its own staged viewer EXE
+for three seconds in a bounded background thread: the transaction must refuse
+that exact EXE lock, and the passive quiescence check must wait for the handle
+to be released before proceeding. Final sandbox teardown independently checks
+every file handle; a locked file is preserved, even inside a disposable runner.
+
 The separate hosted concurrency acceptance (Draft #55) first demonstrated a
 real defect: `RecoverTest` could delete a **still-running** `ApplyTest` journal
 sandbox. All preview operations now acquire a **nonblocking named Windows OS
