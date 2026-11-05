@@ -121,7 +121,12 @@ if (!app.requestSingleInstanceLock()) {
         }
         if (!sessionReady) throw new Error(`Desktop synthetic RFB 2x2 RGBA pixel oracle failed: ${JSON.stringify(lastView)}`);
         // Explicit user-visible session disconnect; no screenshot of framebuffer.
-        await window.webContents.executeJavaScript("document.querySelector('#session-disconnect').click()");
+        const disconnected = await window.webContents.executeJavaScript(`(() => {
+          document.querySelector('#session-disconnect').click();
+          return document.querySelector('#session-view').hidden &&
+            document.querySelector('#quick-form') !== null;
+        })()`);
+        if (!disconnected) throw new Error('Synthetic session did not return to dashboard after explicit disconnect');
         await writeFile(join(process.env.RUNNER_TEMP, 'unboundvnc-viewer-desktop-smoke.json'), JSON.stringify({
           renderer: 'loaded', session: 'synthetic-rfb-connected', url: local.url, gatewayUrl: local.gatewayUrl,
         }));
