@@ -38,11 +38,21 @@ await Check("approval keeps subsequent RFB bytes intact", async () =>
         _ => approval.Task, CancellationToken.None);
     approval.SetResult(true);
     Require(await result.WaitAsync(TimeSpan.FromSeconds(5)), "connected peer was rejected");
-    var bytes = new byte[] { 0x52, 0x46, 0x42 };
+    var bytes = System.Text.Encoding.ASCII.GetBytes("RFB 003.008\n");
     await peer.GetStream().WriteAsync(bytes);
     var received = new byte[bytes.Length];
     await host.GetStream().ReadExactlyAsync(received).AsTask().WaitAsync(TimeSpan.FromSeconds(5));
     Require(received.SequenceEqual(bytes), "pending monitor consumed handshake bytes");
+});
+
+await Check("late pre-approval bytes during poll gap", async () =>
+{
+    await LateArrivalDuringPollGap(closePeer: false);
+});
+
+await Check("late FIN during poll gap", async () =>
+{
+    await LateArrivalDuringPollGap(closePeer: true);
 });
 
 await Check("host revokes pending consent", async () =>
@@ -59,7 +69,7 @@ await Check("host revokes pending consent", async () =>
     Require(await canceled.Task.WaitAsync(TimeSpan.FromSeconds(5)), "prompt cancellation was not delivered");
 });
 
-Console.WriteLine("PASS: 4 pending-consent checks");
+Console.WriteLine("PASS: 6 pending-consent checks");
 
 static async Task Check(string name, Func<Task> check)
 {
@@ -73,6 +83,31 @@ static Task<bool> AwaitApprovalOrCancel(CancellationToken token, TaskCompletionS
     var pendingApproval = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
     token.Register(() => pendingApproval.TrySetResult(false));
     return pendingApproval.Task;
+}
+
+static async Task LateArrivalDuringPollGap(bool closePeer)
+{
+    var pair = await LoopbackPair();
+    using var peer = pair.peer;
+    using var host = pair.host;
+    var afterClearPoll = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+    var approval = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+    var result = PendingConsentMonitor.ApproveWhileConnected(host.Client, _ => approval.Task,
+        CancellationToken.None, cancellation =>
+        {
+            afterClearPoll.TrySetResult(true);
+            // This pause cannot resume until approval cancels it: adversarial timing is fixed.
+            return Task.Delay(Timeout.InfiniteTimeSpan, cancellation);
+        });
+    await afterClearPoll.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    if (closePeer) peer.Close();
+    else await peer.GetStream().WriteAsync(new byte[] { 0x42 });
+    // Establish OS readiness before approving; the monitor remains held idle.
+    using var readyTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+    while (!host.Client.Poll(0, SelectMode.SelectRead))
+        await Task.Delay(1, readyTimeout.Token);
+    approval.SetResult(true);
+    Require(!await result.WaitAsync(TimeSpan.FromSeconds(5)), "late arrival bypassed consent boundary check");
 }
 
 static async Task<(TcpClient peer, TcpClient host)> LoopbackPair()

@@ -4,11 +4,18 @@ namespace UnboundVnc.Host.Windows;
 
 internal static class PendingConsentMonitor
 {
-    internal static async Task<bool> ApproveWhileConnected(
+    internal static Task<bool> ApproveWhileConnected(
         Socket socket, Func<CancellationToken, Task<bool>> approve, CancellationToken lifetime)
+        => ApproveWhileConnected(socket, approve, lifetime,
+            static cancellation => Task.Delay(50, cancellation));
+
+    // The injected delay lets the loopback harness hold an exact gap after a clear poll.
+    internal static async Task<bool> ApproveWhileConnected(
+        Socket socket, Func<CancellationToken, Task<bool>> approve, CancellationToken lifetime,
+        Func<CancellationToken, Task> pauseAfterIdlePoll)
     {
         using var pending = CancellationTokenSource.CreateLinkedTokenSource(lifetime);
-        var peerLost = ObserveDisconnectOrEarlyData(socket, pending.Token);
+        var peerLost = ObserveDisconnectOrEarlyData(socket, pending.Token, pauseAfterIdlePoll);
         try
         {
             var decision = approve(pending.Token);
@@ -17,7 +24,10 @@ internal static class PendingConsentMonitor
 
             bool accepted = await decision.ConfigureAwait(false);
             pending.Cancel(); // End monitoring before any RFB handshake begins.
-            return accepted && !await peerLost.ConfigureAwait(false);
+            if (!accepted || await peerLost.ConfigureAwait(false)) return false;
+            // Recheck after the canceled poll gap. This is a boundary snapshot;
+            // subsequent disconnects are handled by the RFB socket operations.
+            return !HasEarlyDataOrClosed(socket);
         }
         finally
         {
@@ -26,7 +36,8 @@ internal static class PendingConsentMonitor
         }
     }
 
-    private static async Task<bool> ObserveDisconnectOrEarlyData(Socket socket, CancellationToken cancellation)
+    private static async Task<bool> ObserveDisconnectOrEarlyData(
+        Socket socket, CancellationToken cancellation, Func<CancellationToken, Task> pauseAfterIdlePoll)
     {
         try
         {
@@ -35,8 +46,8 @@ internal static class PendingConsentMonitor
             // an otherwise valid TCP peer on Windows.
             while (!cancellation.IsCancellationRequested)
             {
-                if (socket.Poll(0, SelectMode.SelectRead)) return true;
-                await Task.Delay(50, cancellation).ConfigureAwait(false);
+                if (HasEarlyDataOrClosed(socket)) return true;
+                await pauseAfterIdlePoll(cancellation).ConfigureAwait(false);
             }
             return false;
         }
@@ -47,6 +58,15 @@ internal static class PendingConsentMonitor
         catch (Exception ex) when (ex is ObjectDisposedException or SocketException)
         {
             return true; // Broken pending connection is never an authorized connection.
+        }
+    }
+
+    private static bool HasEarlyDataOrClosed(Socket socket)
+    {
+        try { return socket.Poll(0, SelectMode.SelectRead); }
+        catch (Exception ex) when (ex is ObjectDisposedException or SocketException)
+        {
+            return true;
         }
     }
 }
