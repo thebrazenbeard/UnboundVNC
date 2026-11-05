@@ -10,6 +10,14 @@ The `tests/host-windows-runner-desktop` project is an isolated Windows Actions *
 
 It never clicks Start or Approve, injects keyboard/pointer input, initiates an RFB handshake, alters runner policy, touches a production host, or claims live screen sharing. The workflow prints `RFB_FRAMEBUFFER=NOT_TESTED_NO_HUMAN_CONSENT`. Neither a GUI-launch PASS nor test-form screen capture proves Win10/11 user-workstation parity, UAC/lock behavior, consent UX, or framebuffer bytes following a real human-approved session.
 
+## Ephemeral Windows runner synthetic-consent RFB check
+
+The separate `tests/host-windows-ci-rfb` test may automate **Start**, **Approve** and **Stop and revoke** only on an ephemeral **GitHub-hosted** Windows runner with the workflow's explicit opt-in variable. It rejects local/non-GitHub/self-hosted environments and noninteractive desktops, checks port 5901 is unused before launching its own view-only host child, and sends bounded native `BM_CLICK` messages only to verified buttons belonging to that child process. **This is synthetic CI automation, never a human approval or an unattended-access feature.** The test does not change production host code, input injection, UAC, services, firewall, sharing configuration or public listener bindings.
+
+After opt-in, the test paints a uniquely colored, solid **test-owned form** on the runner desktop, checks one local screen pixel in memory, confirms no RFB bytes are sent before the synthetic consent click, performs a loopback RFB 3.8 None handshake, verifies the 32bpp format and a single Raw 1×1 rectangle with the known marker's BGR components, then clicks Stop and requires port closure plus session EOF/reset. No frame bytes/images, credentials, clipboard or desktop content are logged or saved. A FAIL on a real interactive hosted runner is a real test failure, not an opt-out skip; the existing non-consent diagnostic remains distinct.
+
+This test-owned pixel and synthetic approval are **hosted runner RUNTIME_PROBE** evidence only. They cannot establish that a Patrick-owned Windows 10/11 host shows consent to a real person, safely revokes during a lock/UAC transition, handles physical multi-monitor capture, or grants secure remote control. RFB None remains strictly loopback-only; native keyboard/mouse control remains disabled.
+
 ## Disabled local input policy spike
 
 `ExperimentalInputPolicy` models the bytes *after* RFB KeyEvent (7 bytes) and PointerEvent (5 bytes) message types, with exact-length, range, key mapping and coordinate checks. The limited keyboard set is ASCII printable characters, Backspace, Tab, Enter, Escape and arrow keys. It rejects modifier keys, unsupported X11 keysyms, noncanonical down flags, nonzero padding, oversized payloads, out-of-frame coordinates, arithmetic overflow and unsupported pointer button bits (wheel/extended buttons). This deliberately incomplete mapping is not yet suitable for generic RFB viewer input interoperability.
