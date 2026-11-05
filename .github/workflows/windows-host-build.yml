@@ -22,5 +22,5 @@ jobs:
         run: dotnet build apps/host-windows/UnboundVnc.Host.Windows.csproj --no-restore --configuration Release
       - name: Pending-consent loopback checks
         run: dotnet run --project tests/host-windows-consent/HostConsentChecks.csproj --configuration Release
-      - name: Disabled input policy checks
+      - name: Input policy and consent effect-gate checks
         run: dotnet run --project tests/host-windows-input/HostInputPolicyChecks.csproj --configuration Release

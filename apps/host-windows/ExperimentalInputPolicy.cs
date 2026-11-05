@@ -2,8 +2,7 @@ using System.Buffers.Binary;
 
 namespace UnboundVnc.Host.Windows;
 
-// Source-only input model. Nothing in the RFB session calls this prototype.
-// A real input adapter requires interactive Windows/UIPI/desktop qualification.
+// Deliberately bounded mapping: unsupported keysyms and coordinates fail closed.
 internal enum LocalInputConsent { Denied = 0, ViewOnly = 1, AllowControl = 2 }
 
 internal enum LocalKeyKind
@@ -18,7 +17,6 @@ internal enum LocalKeyKind
     Right,
     Down
 }
-
 internal readonly record struct NormalizedKey(bool Down, LocalKeyKind Kind, char Character);
 internal readonly record struct NormalizedPointer(int ScreenX, int ScreenY, byte Buttons);
 
@@ -81,18 +79,4 @@ internal static class ExperimentalInputPolicy
         }
         catch (OverflowException) { return false; }
     }
-}
-
-// Deliberately no SendInput/SetCursorPos import or implementation is present.
-// Even choosing AllowControl must have no effect until a separately reviewed
-// Win32 adapter, interactive test evidence, and per-session UI consent exist.
-internal static class NativeInputAdapter
-{
-    internal const bool Enabled = false;
-
-    internal static bool TryInject(NormalizedKey key, LocalInputConsent consent,
-        bool consentCurrent, bool defaultInputDesktop) => false;
-
-    internal static bool TryInject(NormalizedPointer pointer, LocalInputConsent consent,
-        bool consentCurrent, bool defaultInputDesktop) => false;
 }

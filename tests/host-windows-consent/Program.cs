@@ -69,7 +69,37 @@ await Check("host revokes pending consent", async () =>
     Require(await canceled.Task.WaitAsync(TimeSpan.FromSeconds(5)), "prompt cancellation was not delivered");
 });
 
-Console.WriteLine("PASS: 6 pending-consent checks");
+await Check("typed view-only choice survives connected peer", async () =>
+{
+    var pair = await LoopbackPair();
+    using var peer = pair.peer;
+    using var host = pair.host;
+    var decision = new TaskCompletionSource<LocalInputConsent>(TaskCreationOptions.RunContinuationsAsynchronously);
+    var result = PendingConsentMonitor.DecideWhileConnected(host.Client, _ => decision.Task,
+        LocalInputConsent.Denied, CancellationToken.None);
+    decision.SetResult(LocalInputConsent.ViewOnly);
+    Require(await result.WaitAsync(TimeSpan.FromSeconds(5)) == LocalInputConsent.ViewOnly,
+        "view-only choice changed unexpectedly");
+});
+
+await Check("control choice cannot survive peer FIN", async () =>
+{
+    var pair = await LoopbackPair();
+    using var peer = pair.peer;
+    using var host = pair.host;
+    var decision = new TaskCompletionSource<LocalInputConsent>(TaskCreationOptions.RunContinuationsAsynchronously);
+    var result = PendingConsentMonitor.DecideWhileConnected(host.Client, _ => decision.Task,
+        LocalInputConsent.Denied, CancellationToken.None);
+    peer.Close();
+    using var readyTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+    while (!host.Client.Poll(0, SelectMode.SelectRead))
+        await Task.Delay(1, readyTimeout.Token);
+    decision.SetResult(LocalInputConsent.AllowControl);
+    Require(await result.WaitAsync(TimeSpan.FromSeconds(5)) == LocalInputConsent.Denied,
+        "disconnected peer retained control choice");
+});
+
+Console.WriteLine("PASS: 8 pending-consent/choice checks");
 
 static async Task Check(string name, Func<Task> check)
 {

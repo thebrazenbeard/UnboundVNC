@@ -26,7 +26,7 @@ internal sealed class HostWindow : Form
     private CancellationTokenSource? lifetime;
     private TcpClient? activeClient;
     private Task? acceptWorker;
-    private long consentEpoch;
+    private readonly ConsentEffectGate inputEffects = new();
 
     public HostWindow()
     {
@@ -54,7 +54,7 @@ internal sealed class HostWindow : Form
         listener = server;
         lifetime = new CancellationTokenSource();
         toggle.Text = "Stop and revoke";
-        state.Text = "Loopback 127.0.0.1:5901 only. Each connection requires your approval.";
+        state.Text = "Loopback 127.0.0.1:5901. View only by default; control needs explicit approval.";
         // Never capture screen pixels on the WinForms synchronization context.
         var token = lifetime.Token;
         // Retain the worker task; AcceptLoop catches unexpected failures and always tears down.
@@ -64,7 +64,7 @@ internal sealed class HostWindow : Form
     private void Stop()
     {
         // Revocation becomes visible to the capture worker before socket shutdown.
-        Interlocked.Increment(ref consentEpoch);
+        inputEffects.Revoke();
         lifetime?.Cancel();
         activeClient?.Close();
         listener?.Stop();
@@ -85,7 +85,7 @@ internal sealed class HostWindow : Form
             return;
 
         // Revoke before UI dispatch: a blocked UI thread must not keep a viewer authorized.
-        Interlocked.Increment(ref consentEpoch);
+        inputEffects.Revoke();
         Volatile.Read(ref activeClient)?.Close();
         try
         {
@@ -107,22 +107,50 @@ internal sealed class HostWindow : Form
                 activeClient = client;
                 try
                 {
-                    var offeredEpoch = Volatile.Read(ref consentEpoch);
-                    if (!await PendingConsentMonitor.ApproveWhileConnected(
-                            client.Client, ApproveConnection, cancellation).ConfigureAwait(false) ||
-                        Volatile.Read(ref consentEpoch) != offeredEpoch) continue;
+                    var offeredEpoch = inputEffects.Snapshot;
+                    var consent = await PendingConsentMonitor.DecideWhileConnected(
+                        client.Client, ApproveConnection, LocalInputConsent.Denied, cancellation)
+                        .ConfigureAwait(false);
+                    if (consent is not (LocalInputConsent.ViewOnly or LocalInputConsent.AllowControl) ||
+                        inputEffects.Snapshot != offeredEpoch) continue;
                     var authorizedEpoch = offeredEpoch;
+                    ShowSessionState(server, client, authorizedEpoch, consent == LocalInputConsent.AllowControl
+                        ? "CONTROL approved for this session. Stop and revoke at any time."
+                        : "View-only session approved. Stop and revoke at any time.");
                     using var session = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
                     session.CancelAfter(TimeSpan.FromMinutes(5));
+                    using var expire = session.Token.Register(() =>
+                    {
+                        inputEffects.Revoke();
+                        client.Close();
+                    });
+                    Func<NormalizedKey, bool>? keyInput = null;
+                    Func<NormalizedPointer, byte, bool>? pointerInput = null;
+                    if (consent == LocalInputConsent.AllowControl)
+                    {
+                        keyInput = key => inputEffects.TryEffect(authorizedEpoch, consent,
+                            session.Token, RfbSession.IsDefaultInputDesktop,
+                            () => NativeInputAdapter.TryInject(key));
+                        pointerInput = (pointer, newlyPressed) => inputEffects.TryEffect(authorizedEpoch,
+                            consent, session.Token, RfbSession.IsDefaultInputDesktop,
+                            () => NativeInputAdapter.TryInject(pointer, newlyPressed));
+                    }
                     await RfbSession.Run(client, session.Token,
                         () => !cancellation.IsCancellationRequested &&
-                            Volatile.Read(ref consentEpoch) == authorizedEpoch).ConfigureAwait(false);
+                            inputEffects.Snapshot == authorizedEpoch,
+                        keyInput, pointerInput).ConfigureAwait(false);
                 }
                 catch (Exception ex) when (ex is IOException or SocketException or OperationCanceledException or InvalidDataException or ObjectDisposedException or System.ComponentModel.Win32Exception)
                 {
                     // Deliberately no frame, credential, clipboard or desktop data is logged.
                 }
-                finally { if (ReferenceEquals(activeClient, client)) activeClient = null; }
+                finally
+                {
+                    inputEffects.Revoke();
+                    if (ReferenceEquals(activeClient, client)) activeClient = null;
+                    ShowSessionState(server, null, inputEffects.Snapshot,
+                        "Loopback 127.0.0.1:5901. Waiting for local approval.");
+                }
             }
         }
         catch (Exception ex) when (ex is OperationCanceledException or ObjectDisposedException or SocketException) { }
@@ -150,13 +178,28 @@ internal sealed class HostWindow : Form
         }
     }
 
-    private async Task<bool> ApproveConnection(CancellationToken token)
+    private void ShowSessionState(TcpListener server, TcpClient? client, long epoch, string message)
     {
-        var result = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        try
+        {
+            if (!IsHandleCreated || IsDisposed) return;
+            BeginInvoke((Action)(() =>
+            {
+                if (IsDisposed || !ReferenceEquals(listener, server) ||
+                    inputEffects.Snapshot != epoch || !ReferenceEquals(activeClient, client)) return;
+                state.Text = message;
+            }));
+        }
+        catch (InvalidOperationException) { /* Form closing. */ }
+    }
+
+    private async Task<LocalInputConsent> ApproveConnection(CancellationToken token)
+    {
+        var result = new TaskCompletionSource<LocalInputConsent>(TaskCreationOptions.RunContinuationsAsynchronously);
         Form? prompt = null;
         using var registration = token.Register(() =>
         {
-            result.TrySetResult(false);
+            result.TrySetResult(LocalInputConsent.Denied);
             try
             {
                 if (IsHandleCreated && !IsDisposed)
@@ -164,41 +207,48 @@ internal sealed class HostWindow : Form
             }
             catch (InvalidOperationException) { /* Form closed while revoking. */ }
         });
-        if (token.IsCancellationRequested || IsDisposed || !IsHandleCreated) return false;
+        if (token.IsCancellationRequested || IsDisposed || !IsHandleCreated) return LocalInputConsent.Denied;
         try
         {
             BeginInvoke((Action)(() =>
             {
-                if (token.IsCancellationRequested || IsDisposed) { result.TrySetResult(false); return; }
+                if (token.IsCancellationRequested || IsDisposed) { result.TrySetResult(LocalInputConsent.Denied); return; }
                 // Non-modal: the local Stop and revoke button remains operational.
                 var dialog = new Form {
-                    Text = "UnboundVNC | Approve local screen sharing",
-                    Width = 510, Height = 190, StartPosition = FormStartPosition.CenterParent,
+                    Text = "UnboundVNC | Choose local sharing permission",
+                    Width = 610, Height = 225, StartPosition = FormStartPosition.CenterParent,
                     ShowInTaskbar = false, MinimizeBox = false, MaximizeBox = false
                 };
                 prompt = dialog;
                 var warning = new Label {
                     Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter,
-                    Text = "Allow one view-only RFB session for at most five minutes?\n" +
-                           "A listener is active on 127.0.0.1:5901 (loopback only).\n" +
-                           "No keyboard, mouse, clipboard or unattended control is enabled."
+                    Text = "One attended session, at most five minutes. View only is the default.\n" +
+                           "Allow control also permits basic typing and pointer movement/clicks.\n" +
+                           "RFB None authentication is used ONLY on 127.0.0.1:5901.\n" +
+                           "Never tunnel or expose this prototype. Stop and revoke remains available."
                 };
                 var buttons = new FlowLayoutPanel {
-                    Dock = DockStyle.Bottom, Height = 45, FlowDirection = FlowDirection.RightToLeft
+                    Dock = DockStyle.Bottom, Height = 50, FlowDirection = FlowDirection.RightToLeft
                 };
                 var reject = new Button { Text = "Reject", Width = 110 };
-                var approve = new Button { Text = "Approve", Width = 110 };
-                reject.Click += (_, _) => { result.TrySetResult(false); dialog.Close(); };
-                approve.Click += (_, _) => { result.TrySetResult(!token.IsCancellationRequested); dialog.Close(); };
-                dialog.FormClosed += (_, _) => result.TrySetResult(false);
+                var approve = new Button { Text = "Approve view only", Width = 140 };
+                var control = new Button { Text = "Allow control", Width = 140 };
+                reject.Click += (_, _) => { result.TrySetResult(LocalInputConsent.Denied); dialog.Close(); };
+                approve.Click += (_, _) => { result.TrySetResult(token.IsCancellationRequested ?
+                    LocalInputConsent.Denied : LocalInputConsent.ViewOnly); dialog.Close(); };
+                control.Click += (_, _) => { result.TrySetResult(token.IsCancellationRequested ?
+                    LocalInputConsent.Denied : LocalInputConsent.AllowControl); dialog.Close(); };
+                dialog.FormClosed += (_, _) => result.TrySetResult(LocalInputConsent.Denied);
                 buttons.Controls.Add(reject);
                 buttons.Controls.Add(approve);
+                buttons.Controls.Add(control);
                 dialog.Controls.Add(warning);
                 dialog.Controls.Add(buttons);
+                dialog.AcceptButton = approve;
                 dialog.Show(this);
             }));
         }
-        catch (InvalidOperationException) { result.TrySetResult(false); }
+        catch (InvalidOperationException) { result.TrySetResult(LocalInputConsent.Denied); }
         return await result.Task.ConfigureAwait(false);
     }
 }
@@ -210,10 +260,13 @@ internal static class RfbSession
     private const int MaxWidth = 1280;
     private const int MaxHeight = 720;
 
-    public static async Task Run(TcpClient client, CancellationToken token, Func<bool> stillAuthorized)
+    public static async Task Run(TcpClient client, CancellationToken token, Func<bool> stillAuthorized,
+        Func<NormalizedKey, bool>? keyInput, Func<NormalizedPointer, byte, bool>? pointerInput)
     {
         // Approval happens before this method, so no protocol or screen bytes are sent first.
         if (!stillAuthorized()) throw new OperationCanceledException("Local consent revoked");
+        if ((keyInput is null) != (pointerInput is null))
+            throw new InvalidDataException("Inconsistent input consent");
         using var stream = client.GetStream();
         var desktop = Screen.PrimaryScreen?.Bounds ?? throw new InvalidDataException("No primary screen");
         int width = Math.Min(desktop.Width, MaxWidth), height = Math.Min(desktop.Height, MaxHeight);
@@ -229,10 +282,13 @@ internal static class RfbSession
         await WriteU16(stream, (ushort)width, token);
         await WriteU16(stream, (ushort)height, token);
         await stream.WriteAsync(PixelFormat, token);
-        var name = Encoding.UTF8.GetBytes("UnboundVNC attended local preview (view only)");
+        var name = Encoding.UTF8.GetBytes(keyInput is null
+            ? "UnboundVNC attended local preview (view only)"
+            : "UnboundVNC attended local preview (basic local control)");
         await WriteU32(stream, (uint)name.Length, token);
         await stream.WriteAsync(name, token);
         var scratch = new byte[20];
+        byte previousButtons = 0;
         while (true)
         {
             token.ThrowIfCancellationRequested();
@@ -262,12 +318,37 @@ internal static class RfbSession
                     await SendRawRectangle(stream, desktop.Left + x, desktop.Top + y, x, y, w, h, token, stillAuthorized);
                     await Task.Delay(100, token).ConfigureAwait(false); // Bound client-driven capture to at most 10 frames/s.
                     break;
-                case 4: // KeyEvent deliberately discarded; no unattended input.
+                case 4: // KeyEvent: default view-only; control requires explicit host approval.
+                {
                     await stream.ReadExactlyAsync(scratch.AsMemory(0, 7), token);
+                    if (keyInput is not null)
+                    {
+                        if (!ExperimentalInputPolicy.TryParseKey(scratch.AsSpan(0, 7), out var key))
+                            throw new InvalidDataException("Unsupported or malformed keyboard event");
+                        // One-shot press/release; never retain a remote-held key.
+                        if (key.Down && !keyInput(key))
+                            throw new OperationCanceledException("Input permission revoked or injection failed");
+                        if (key.Down) await Task.Delay(20, token).ConfigureAwait(false); // <=50 taps/s.
+                    }
                     break;
-                case 5: // PointerEvent deliberately discarded.
+                }
+                case 5: // PointerEvent: default view-only; control is bounded to preview.
+                {
                     await stream.ReadExactlyAsync(scratch.AsMemory(0, 5), token);
+                    if (pointerInput is not null)
+                    {
+                        if (!ExperimentalInputPolicy.TryParsePointer(scratch.AsSpan(0, 5), width, height,
+                                desktop.Left, desktop.Top, out var pointer))
+                            throw new InvalidDataException("Unsupported or unsafe pointer event");
+                        byte newlyPressed = (byte)(pointer.Buttons & ~previousButtons);
+                        // Click on rising edge only; no drag or persistent remote button hold.
+                        if (!pointerInput(pointer, newlyPressed))
+                            throw new OperationCanceledException("Input permission revoked or injection failed");
+                        previousButtons = pointer.Buttons;
+                        await Task.Delay(20, token).ConfigureAwait(false); // <=50 pointer events/s.
+                    }
                     break;
+                }
                 case 6: // ClientCutText deliberately discarded with bounded size.
                     await stream.ReadExactlyAsync(scratch.AsMemory(0, 7), token);
                     uint length = BinaryPrimitives.ReadUInt32BigEndian(scratch.AsSpan(3, 4));
@@ -330,7 +411,7 @@ internal static class RfbSession
     [DllImport("user32.dll", SetLastError = true)] private static extern IntPtr OpenInputDesktop(uint flags, bool inherit, uint access);
     [DllImport("user32.dll", EntryPoint = "GetUserObjectInformationW", CharSet = CharSet.Unicode, SetLastError = true)] private static extern bool GetUserObjectInformationW(IntPtr obj, int index, StringBuilder? buffer, uint length, out uint required);
     [DllImport("user32.dll")] private static extern bool CloseDesktop(IntPtr handle);
-    private static bool IsDefaultInputDesktop()
+    internal static bool IsDefaultInputDesktop()
     {
         const uint DesktopReadObjects = 0x0001;
         var handle = OpenInputDesktop(0, false, DesktopReadObjects);
