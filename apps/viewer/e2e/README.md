@@ -57,6 +57,9 @@ on the same loopback RFB port, and exercises the visible Retry connection
 button. The replacement framebuffer pixels, mobile layout, reset view-only
 state and absence of stored credentials are asserted and captured as
 `stock-rfb-reconnected-mobile.png` and `resize-reconnect-result.json`.
+noVNC can report `clean: true` on a server-initiated socket close; that is
+**not** proof the user deliberately disconnected. A remote close now always
+shows the retry banner, whereas the explicit Disconnect button does not.
 No automatic reconnection, host access or encrypted transport is implied.
 
 ## Stock VncAuth browser qualification (disposable password)

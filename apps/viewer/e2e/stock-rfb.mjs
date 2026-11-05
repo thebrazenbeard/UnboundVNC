@@ -255,6 +255,8 @@ async function run() {
     }, null, 2));
     await page.locator('#session-disconnect').click();
     assert.equal(await page.locator('#session-view').isVisible(), false, 'disconnect returns to dashboard');
+    assert.equal(await page.locator('#connection-error').isVisible(), false,
+      'explicit user Disconnect must not be misclassified as remote session failure');
     succeeded = true;
     console.log(JSON.stringify({ outcome: 'PASS', browser: browser.version(), gatewayOrigin,
       rfbPort, framebuffer, desktopFit, mobileFit, mobileReconnected,

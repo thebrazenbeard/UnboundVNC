@@ -334,14 +334,16 @@ async function connectTo(device) {
       connection.failureMessage = `VNC authentication failed${event.detail?.reason ? ': ' + event.detail.reason : '.'}`;
       notify(connection.failureMessage, 'error');
     });
-    rfb.addEventListener('disconnect', event => {
+    rfb.addEventListener('disconnect', () => {
       if (state.connection !== connection) return;
       state.connection = null;
       hideSession();
-      if (connection.failureMessage || !event.detail?.clean) {
-        showConnectionFailure(device, connection.failureMessage || 'Remote connection ended unexpectedly.');
-      }
-      notify(event.detail?.clean ? 'Session disconnected.' : 'Remote connection ended unexpectedly.', event.detail?.clean ? 'info' : 'error');
+      // noVNC's `clean` flag means no protocol failure; even a remote-initiated
+      // WebSocket close may be `clean`. Only our explicit Disconnect path is
+      // user-initiated, and it clears state.connection before this event.
+      const message = connection.failureMessage || 'Remote connection ended unexpectedly.';
+      showConnectionFailure(device, message);
+      notify(message, 'error');
     });
   } catch (error) {
     if (state.connection !== connection) return;
