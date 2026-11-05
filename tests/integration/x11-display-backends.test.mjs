@@ -1,0 +1,283 @@
+// Stock, independently implemented RFB screen scrapers against a synthetic
+// Xvfb desktop. Opt-in only: None authentication is safe here solely because
+// the runner and VNC listeners are ephemeral and loopback-only.
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { spawn, spawnSync } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
+import { once } from 'node:events';
+import { readFile } from 'node:fs/promises';
+import { connect, createServer } from 'node:net';
+import { createGateway } from '../../apps/gateway/src/server.mjs';
+
+const ENABLED = process.env.RFB_X11_SCRAPERS === '1';
+const WIDTH = 48;
+const HEIGHT = 32;
+const COLOUR = [0x28, 0x91, 0x4c];
+const TIMEOUT = 12_000;
+let displayNumber = 80 + (process.pid % 150);
+
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+async function unusedPort() {
+  const server = createServer();
+  await new Promise((resolve, reject) => server.once('error', reject).listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+  await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+  return port;
+}
+
+function launch(t, command, args) {
+  const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+  let tail = '';
+  for (const stream of [child.stdout, child.stderr]) {
+    stream.on('data', chunk => { tail = (tail + chunk.toString()).slice(-2400); });
+  }
+  child.on('error', error => { tail = `spawn error: ${error.message}`; });
+  t.after(async () => {
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill('SIGTERM');
+      await Promise.race([once(child, 'exit'), delay(2000)]);
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+    }
+  });
+  return { child, logTail: () => tail };
+}
+
+async function awaitPort(port, processInfo) {
+  const deadline = Date.now() + TIMEOUT;
+  while (Date.now() < deadline) {
+    if (processInfo.child.exitCode !== null || processInfo.child.signalCode !== null)
+      throw new Error(`RFB process exited before ready: ${processInfo.logTail()}`);
+    try {
+      const socket = connect({ host: '127.0.0.1', port });
+      await once(socket, 'connect', { signal: AbortSignal.timeout(500) });
+      socket.destroy();
+      return;
+    } catch { await delay(100); }
+  }
+  throw new Error(`RFB listener did not start: ${processInfo.logTail()}`);
+}
+
+async function listenerAndConnections(port) {
+  const hex = port.toString(16).toUpperCase().padStart(4, '0');
+  const tables = await Promise.all(['/proc/net/tcp', '/proc/net/tcp6'].map(path => readFile(path, 'utf8')));
+  const records = tables.flatMap((table, index) => table.split('\n').slice(1)
+    .map(line => ({ family: index, fields: line.trim().split(/\s+/) }))
+    .filter(({ fields }) => fields[1]?.endsWith(`:${hex}`) || fields[2]?.endsWith(`:${hex}`)));
+  const listeners = records.filter(({ fields }) => fields[3] === '0A');
+  assert.ok(listeners.length > 0, 'expected an RFB listener');
+  for (const { family, fields } of listeners) {
+    const loopback = family === 0 ? `0100007F:${hex}` : `00000000000000000000000001000000:${hex}`;
+    assert.equal(fields[1], loopback, 'RFB listening outside loopback is forbidden');
+  }
+  return records.filter(({ fields }) => fields[3] === '01').map(({ fields }) => [fields[1], fields[2]]);
+}
+
+async function awaitConnectionsGone(port) {
+  const deadline = Date.now() + TIMEOUT;
+  while (Date.now() < deadline) {
+    if ((await listenerAndConnections(port)).length === 0) return;
+    await delay(100);
+  }
+  throw new Error(`gateway leaked upstream ESTABLISHED RFB endpoints: ${JSON.stringify(await listenerAndConnections(port))}`);
+}
+
+async function startBackend(t, backend) {
+  assert.equal(process.platform, 'linux');
+  const display = `:${displayNumber++}`;
+  const xvfb = launch(t, 'Xvfb', [display, '-screen', '0', `${WIDTH}x${HEIGHT}x24`, '-nolisten', 'tcp', '-ac']);
+  const deadline = Date.now() + TIMEOUT;
+  let painted = false;
+  while (Date.now() < deadline) {
+    if (xvfb.child.exitCode !== null || xvfb.child.signalCode !== null)
+      throw new Error(`Xvfb exited early: ${xvfb.logTail()}`);
+    const root = spawnSync('xsetroot', ['-display', display, '-solid', '#28914c'],
+      { encoding: 'utf8', timeout: 1500 });
+    if (root.status === 0) { painted = true; break; }
+    await delay(100);
+  }
+  assert.ok(painted, `Xvfb did not accept synthetic root colour: ${xvfb.logTail()}`);
+  const port = await unusedPort();
+  let command;
+  let args;
+  if (backend === 'x11vnc') {
+    command = 'x11vnc';
+    args = ['-norc', '-display', display, '-localhost', '-rfbport', String(port),
+      '-nopw', '-forever', '-shared', '-quiet', '-noxdamage'];
+  } else {
+    command = 'X0tigervnc';
+    args = ['-display', display, '-rfbport', String(port), '-SecurityTypes', 'None',
+      '-localhost', 'yes', '-interface', '127.0.0.1', '-AlwaysShared'];
+  }
+  const scraper = launch(t, command, args);
+  await awaitPort(port, scraper);
+  assert.deepEqual(await listenerAndConnections(port), [], 'RFB readiness probe did not disconnect');
+  return port;
+}
+
+// Minimal real masked WebSocket client: it reads bytes from the actual gateway,
+// not from a mocked RFB fixture. All client-to-server frames are masked.
+async function openWebSocket(origin, path, t) {
+  const { port } = new URL(origin);
+  const socket = connect({ host: '127.0.0.1', port: Number(port) });
+  socket.on('error', () => {});
+  t.after(() => socket.destroy());
+  await once(socket, 'connect', { signal: AbortSignal.timeout(TIMEOUT) });
+  let data = Buffer.alloc(0);
+  let rfb = Buffer.alloc(0);
+  let status = null;
+  let closed = false;
+  const callbacks = new Set();
+  const wake = () => { for (const cb of [...callbacks]) cb(); };
+  socket.on('close', () => { closed = true; wake(); });
+  socket.on('data', bytes => {
+    data = Buffer.concat([data, bytes]);
+    if (status === null) {
+      const headerEnd = data.indexOf('\r\n\r\n');
+      if (headerEnd < 0) return;
+      status = data.subarray(0, headerEnd + 4).toString('ascii');
+      data = data.subarray(headerEnd + 4);
+    }
+    if (!status.startsWith('HTTP/1.1 101')) { wake(); return; }
+    while (data.length >= 2) {
+      const opcode = data[0] & 15;
+      assert.equal(data[1] & 0x80, 0, 'server WebSocket must not mask frames');
+      let length = data[1] & 127;
+      let header = 2;
+      if (length === 126) {
+        if (data.length < 4) break;
+        length = data.readUInt16BE(2); header = 4;
+      } else if (length === 127) {
+        if (data.length < 10) break;
+        length = Number(data.readBigUInt64BE(2)); header = 10;
+      }
+      assert.ok(length <= 1024 * 1024, 'excessive WS frame');
+      if (data.length < header + length) break;
+      const payload = data.subarray(header, header + length);
+      data = data.subarray(header + length);
+      if (opcode === 2 || opcode === 0) rfb = Buffer.concat([rfb, payload]);
+      if (opcode === 8) socket.destroy();
+    }
+    wake();
+  });
+  socket.write(`GET ${path} HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\n` +
+    'Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\n' +
+    `Sec-WebSocket-Key: ${randomBytes(16).toString('base64')}\r\nOrigin: ${origin}\r\n\r\n`);
+  const awaitValue = (fn, label) => new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { callbacks.delete(check); reject(new Error(`${label} timeout`)); }, TIMEOUT);
+    function check() {
+      const value = fn();
+      if (value !== null) { clearTimeout(timer); callbacks.delete(check); resolve(value); }
+      else if (closed) { clearTimeout(timer); callbacks.delete(check); reject(new Error(`${label} socket closed`)); }
+    }
+    callbacks.add(check);
+    check();
+  });
+  return {
+    socket,
+    headers: () => awaitValue(() => status, 'WS upgrade'),
+    read: length => awaitValue(() => {
+      if (rfb.length < length) return null;
+      const bytes = Buffer.from(rfb.subarray(0, length));
+      rfb = rfb.subarray(length);
+      return bytes;
+    }, `RFB read ${length}`),
+    write: bytes => {
+      const payload = Buffer.from(bytes);
+      assert.ok(payload.length < 65536);
+      const prefix = payload.length < 126 ? Buffer.from([0x82, 0x80 | payload.length])
+        : Buffer.from([0x82, 0xfe, payload.length >> 8, payload.length & 255]);
+      const mask = randomBytes(4);
+      const encoded = Buffer.from(payload);
+      for (let i = 0; i < encoded.length; i++) encoded[i] ^= mask[i % 4];
+      socket.write(Buffer.concat([prefix, mask, encoded]));
+    },
+    close: () => socket.write(Buffer.concat([Buffer.from([0x88, 0x80]), randomBytes(4)])),
+  };
+}
+
+async function qualifyRfb(origin, port, t, backend) {
+  const response = await fetch(`${origin}/api/sessions`, {
+    method: 'POST', headers: { Origin: origin, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ host: '127.0.0.1', port }), signal: AbortSignal.timeout(TIMEOUT),
+  });
+  assert.equal(response.status, 201);
+  const ticket = await response.json();
+  const ws = await openWebSocket(origin, ticket.wsPath, t);
+  assert.match(await ws.headers(), /^HTTP\/1\.1 101 /);
+  const version = (await ws.read(12)).toString('ascii');
+  assert.match(version, /^RFB 003\.(003|007|008)\n$/);
+  ws.write(Buffer.from(version === 'RFB 003.003\n' ? version : 'RFB 003.008\n'));
+  if (version === 'RFB 003.003\n') {
+    assert.equal((await ws.read(4)).readUInt32BE(), 1, 'RFB 3.3 None on loopback');
+  } else {
+    const count = (await ws.read(1))[0];
+    assert.ok(count > 0 && count < 32);
+    const types = await ws.read(count);
+    assert.ok(types.includes(1), 'RFB server must offer None on private test loopback');
+    ws.write(Buffer.from([1]));
+    assert.equal((await ws.read(4)).readUInt32BE(), 0, 'RFB SecurityResult');
+  }
+  ws.write(Buffer.from([1])); // ClientInit shared desktop.
+  const init = await ws.read(24);
+  const width = init.readUInt16BE(0);
+  const height = init.readUInt16BE(2);
+  assert.deepEqual([width, height], [WIDTH, HEIGHT]);
+  assert.equal(init[4], 32, 'expected 32 bits per pixel on Xvfb depth 24');
+  assert.equal(init[7], 1, 'expected true-colour pixels');
+  assert.deepEqual([init.readUInt16BE(8), init.readUInt16BE(10), init.readUInt16BE(12)], [255, 255, 255]);
+  const nameLength = init.readUInt32BE(20);
+  assert.ok(nameLength > 0 && nameLength <= 4096);
+  await ws.read(nameLength);
+  ws.write(Buffer.from([2, 0, 0, 1, 0, 0, 0, 0])); // Raw encoding only.
+  const request = Buffer.alloc(10);
+  request[0] = 3;
+  request.writeUInt16BE(width, 6);
+  request.writeUInt16BE(height, 8);
+  ws.write(request);
+  const header = await ws.read(4);
+  assert.equal(header[0], 0, 'expected FramebufferUpdate');
+  const rectangles = header.readUInt16BE(2);
+  assert.ok(rectangles > 0 && rectangles <= 32);
+  const coverage = new Uint8Array(width * height);
+  for (let i = 0; i < rectangles; i++) {
+    const rect = await ws.read(12);
+    const [x, y, w, h] = [0, 2, 4, 6].map(offset => rect.readUInt16BE(offset));
+    assert.equal(rect.readInt32BE(8), 0, 'expected stock server Raw encoding');
+    assert.ok(w && h && x + w <= width && y + h <= height);
+    const pixels = await ws.read(w * h * 4);
+    for (let p = 0; p < w * h; p++) {
+      const word = init[6] ? pixels.readUInt32BE(p * 4) : pixels.readUInt32LE(p * 4);
+      const actual = [init[14], init[15], init[16]].map(shift => (word >>> shift) & 255);
+      assert.deepEqual(actual, COLOUR, `${backend} root pixel mismatch at rect ${i}, pixel ${p}`);
+      const index = (y + Math.floor(p / w)) * width + x + (p % w);
+      assert.equal(coverage[index], 0, 'overlapping Raw rectangle');
+      coverage[index] = 1;
+    }
+  }
+  assert.ok(coverage.every(value => value === 1), 'every framebuffer pixel must be covered');
+  console.log(`${backend}: ${version.trim()}, Raw ${width}x${height}, ${rectangles} rect(s), ${coverage.length} verified pixels`);
+  return ws;
+}
+
+for (const backend of ['x11vnc', 'x0tigervnc']) {
+  test(`stock ${backend} Xvfb → gateway: Raw framebuffer, graceful and abrupt disconnect`,
+    { skip: !ENABLED, timeout: 70_000 }, async t => {
+      const port = await startBackend(t, backend);
+      const gateway = createGateway({ port: 0, allowedPorts: [port] });
+      const origin = await gateway.listen();
+      t.after(() => gateway.close());
+      const first = await qualifyRfb(origin, port, t, backend);
+      const firstClosed = once(first.socket, 'close', { signal: AbortSignal.timeout(TIMEOUT) });
+      first.close();
+      await firstClosed;
+      await awaitConnectionsGone(port);
+      const second = await qualifyRfb(origin, port, t, backend);
+      const secondClosed = once(second.socket, 'close', { signal: AbortSignal.timeout(TIMEOUT) });
+      second.socket.destroy();
+      await secondClosed;
+      await awaitConnectionsGone(port);
+      console.log(`${backend}: graceful WS Close and abrupt TCP teardown both released upstream RFB`);
+    });
+}
