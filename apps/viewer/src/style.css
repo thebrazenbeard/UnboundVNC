@@ -62,6 +62,10 @@ button:focus-visible, a:focus-visible, input:focus-visible { outline: 2px solid 
 .top-pill { font-size: 9px; color: #93a5bf; font-weight: 700; letter-spacing: .14em; display: flex; align-items: center; gap: 12px; }
 .top-pill span { color: var(--mint); }
 .hero { margin: 46px 0 66px; min-height: 330px; border: 1px solid rgba(113, 142, 187, .16); border-radius: 22px; padding: clamp(28px, 4vw, 53px); background: radial-gradient(ellipse at 79% 54%, rgba(32, 103, 128, .15), transparent 56%), linear-gradient(110deg, rgba(19, 35, 56, .94), rgba(12, 24, 42, .88)); display: grid; grid-template-columns: 1.4fr 1fr; overflow: hidden; position: relative; }
+.connection-error { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px 20px; border: 1px solid rgba(249,162,156,.5); background: rgba(97,43,55,.3); border-radius: 13px; padding: 16px 19px; margin-top: 24px; }
+.connection-error strong { display: block; color: #ffd0cc; font-size: 13px; }
+.connection-error p { margin: 6px 0 0; color: #edc7c7; line-height: 1.5; font-size: 12px; overflow-wrap: anywhere; }
+.connection-error-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .hero:before { content: ''; position: absolute; inset: 0; background-image: linear-gradient(rgba(255,255,255,.022) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.022) 1px, transparent 1px); background-size: 42px 42px; mask-image: linear-gradient(to right, transparent 20%, #000 100%); pointer-events: none; }
 .hero > * { position: relative; z-index: 1; }
 .hero-eyebrow { font-size: 9px; color: var(--mint); margin: 2px 0 17px; }
@@ -197,8 +201,9 @@ body.session-active { overflow: hidden; }
   .quick-panel { padding: 22px; }
   .quick-form { flex-wrap: wrap; }
   .quick-form .btn { width: 100%; }
-  .session-status, .session-footnote { display: none; }
-  .session-topbar { gap: 8px; padding: 0 8px; }
+  .session-footnote { display: none; }
+  .session-topbar { gap: 6px 8px; padding: 8px; flex-wrap: wrap; }
+  .session-status { display: block; order: 3; flex-basis: 100%; font-size: 10px; text-align: center; padding: 3px 7px; }
   .session-identity { min-width: 0; }
   .session-identity small { font-size: 8px; }
   .session-action { padding: 0 7px; }
