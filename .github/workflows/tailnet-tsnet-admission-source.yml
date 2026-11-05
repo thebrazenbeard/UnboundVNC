@@ -23,3 +23,9 @@ jobs:
       - name: Compile real tsnet SDK API and run fail-closed unit tests
         working-directory: experiments/tailnet-admission-go
         run: go test -mod=mod -count=1 -v ./...
+      - name: Emit public module checksum manifest for reviewable pinning
+        working-directory: experiments/tailnet-admission-go
+        run: |
+          printf 'GO_SUM_BASE64='
+          base64 -w0 go.sum
+          printf '\n'
