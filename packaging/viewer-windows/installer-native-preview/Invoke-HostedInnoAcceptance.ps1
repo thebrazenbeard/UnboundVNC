@@ -17,6 +17,7 @@ $fixtureScript = [IO.Path]::GetFullPath('packaging/viewer-windows/tests/ci-rfb-f
 $iss = [IO.Path]::GetFullPath('packaging/viewer-windows/installer-native-preview/UnboundVNCViewer-CI.iss')
 $marker = Join-Path $root '.native-ci-owned'
 $ownerFile = Join-Path $root '.native-owner-input'
+$manifestFile = Join-Path $root '.native-manifest-input'
 $installedOwner = Join-Path $install '.unboundvnc-ci-installer-owned'
 $exe = Join-Path $install 'UnboundVNCViewer.exe'
 $fixture = $null
@@ -122,6 +123,7 @@ function Assert-InstallOwned([hashtable]$before) {
     $null=$installed.Remove($name)
   }
   $null=$installed.Remove('.unboundvnc-ci-installer-owned')
+  $null=$installed.Remove('.unboundvnc-ci-manifest')
   foreach($name in @($installed.Keys)) {
     if($name -notmatch '^unins[0-9]+\.(exe|dat)$') {
       throw "Native Inno install added unknown content: $name"
@@ -144,6 +146,17 @@ try {
   $null=New-Item -ItemType Directory -Path $build -Force
   Set-Content -LiteralPath $marker -Value $guid -NoNewline
   Set-Content -LiteralPath $ownerFile -Value $guid -NoNewline
+  $manifestRows=@($before.Keys | Sort-Object | ForEach-Object {
+    $relative=$_
+    if($relative -match '[|\r\n]' -or [IO.Path]::IsPathRooted($relative) -or $relative -match '(^|[\\/])\.\.([\\/]|$)') {
+      throw "Unsafe source path in native manifest: $relative"
+    }
+    $parts=$before[$relative] -split ':'
+    if($parts.Count -ne 2 -or $parts[1] -notmatch '^[0-9A-F]{64}$') { throw "Invalid SHA256 source entry: $relative" }
+    "$($parts[1])|$($relative.Replace('/','\'))"
+  })
+  Set-Content -LiteralPath $manifestFile -Encoding ascii -Value $manifestRows
+  $manifestHash=(Get-FileHash -LiteralPath $manifestFile -Algorithm SHA256).Hash
 
   $compiler = 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
   if(-not (Test-Path -LiteralPath $compiler -PathType Leaf)) { throw 'Pinned runner Inno Setup 6 compiler unavailable; no unverified download allowed.' }
@@ -159,7 +172,8 @@ try {
     # This script has no SignTool directive, and the output signature is verified below.
     "-dCI_Source=$source","-dCI_Target=$install",
     "-dCI_Output=$build","-dCI_OwnerFile=$ownerFile",
-    "-dCI_Guid=$guid",$iss
+    "-dCI_Guid=$guid","-dCI_ManifestFile=$manifestFile",
+    "-dCI_ManifestHash=$manifestHash","-dCI_ManifestCount=$($manifestRows.Count)",$iss
   )
   & $compiler @compilerArgs
   if($LASTEXITCODE -ne 0) { throw 'CI-only Inno setup compilation failed.' }

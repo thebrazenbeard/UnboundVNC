@@ -12,10 +12,12 @@ The native setup uses Inno's documented `PrivilegesRequired=lowest`, no
 privilege override, `CreateUninstallRegKey=no`, `UsePreviousAppDir=no`, and
 strictly embeds the one runner-specific destination. Setup's `PrepareToInstall`
 rejects `/DIR` redirection and an existing destination. Its uninstaller requires
-the compiled GUID marker before proceeding; the CI harness additionally refuses
-unknown, modified, locked, or symlink/reparse content before invoking it. A
-native engine is exercised; no standalone per-user installer safety or crash
-recovery guarantee is implied by these temporary-runner checks.
+the compiled GUID marker, an embedded-SHA256-bound file manifest, every recorded
+payload hash and an exact recursively enumerated directory/file inventory
+without symlinks/junctions before proceeding. The CI harness separately refuses
+unknown, modified, locked, or symlink/reparse content. Both layers are
+test-only; the unsigned native EXE and manifest are **not** a tamper-resistant
+distribution security boundary and no crash-recovery guarantee follows.
 
 `Invoke-HostedInnoAcceptance.ps1` fails closed off a GitHub-hosted Windows
 runner. On CI it:
@@ -31,10 +33,13 @@ runner. On CI it:
 4. Launches the **installed** Electron EXE against a synthetic local RFB 3.8
    server. Its renderer tests the 2×2 raw RGBX framebuffer **16 RGBA bytes**
    (red, green, blue, white), disconnect, process exit, and closed loopback ports.
-5. Falsifies pre-uninstall guards with an unknown file, an exclusive lock, and
-   a junction; runs Inno's native uninstaller; confirms the install folder was
-   removed, separate profile survived, all source file hashes are unchanged,
-   and the HKCU key inventory is unchanged.
+5. Falsifies harness guards with an unknown file, exclusive lock and junction.
+   Then invokes the **native uninstaller directly** against altered/missing
+   ownership marker, extra installed file and a junction. Each must return a
+   nonzero refusal (bounded 25 seconds) without changing any app SHA256 or a
+   test-owned decoy. After removing only those fixtures, native uninstall must
+   remove the app folder, retain separate profile/decoy and preserve every
+   original source hash and the HKCU key inventory.
 6. Deletes only the GUID marker-owned test root after rejecting reparse content.
    No executable artifact is uploaded by this workflow.
 
@@ -67,3 +72,12 @@ technology.
 
 Only a reviewed separate release plan should graduate this deliberately
 test-owned compiler script into a per-user consumer installer.
+
+The native file manifest is generated under the unique CI root at compile time,
+copied into the installed app, and its SHA256 is embedded in the unsigned Inno
+script. This detects accidental or test-injected changes, not malicious
+same-user alteration of the unsigned executable, replacement of its compiled
+guard, path-swap races, all alternate data streams or arbitrarily interrupted
+uninstall. A test-first hosted red run confirmed that the previous owner-only
+native script partially deleted installed payload when an unknown file existed;
+the current native guard must pass fresh hosted negative fixtures before import.
