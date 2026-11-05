@@ -14,7 +14,9 @@ fakes agree. Do not redistribute or enable this as a remote desktop product.
    certificate identity, grants, DNS and client policy are not tested here.
 2. For every incoming accepted socket, the local Tailscale API's
    `LocalClient().WhoIs(request.Context(), request.RemoteAddr)` must resolve a
-   stable node ID. Headers (`Tailscale-User-Login`, `X-Forwarded-*`, Serve
+   stable node ID. This is an **opaque value** (upstream samples use strings
+   such as `n5SUKe8CNTRL`, not an invented `node:` prefix); compare exact IDs.
+   Headers (`Tailscale-User-Login`, `X-Forwarded-*`, Serve
    headers), URL parameters, bearer strings and displayed login names are not
    identity proof. Device-node identity alone does **not** authorize a session.
 3. An **attended Windows host** must provide a trusted authenticated local IPC
