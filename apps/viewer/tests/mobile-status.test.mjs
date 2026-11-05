@@ -42,3 +42,15 @@ test('other mobile session controls retain stable names without changing view-on
   assert.match(js, /id="session-disconnect"[^>]*aria-label="Disconnect"/);
   assert.match(js, /rfb\.viewOnly = !rfb\.viewOnly/);
 });
+
+test('Retry carries a View only choice in memory without changing fresh connection defaults', () => {
+  // Source-level seam assertions; the stock-TigerVNC Chromium test separately
+  // proves the UI state across a real remote close, Retry, and fresh connect.
+  const js = readFileSync(new URL('../src/main.js', import.meta.url), 'utf8');
+  assert.match(js, /state\.lastFailure = \{ device, message, viewOnly \}/);
+  assert.match(js, /async function connectTo\(device, viewOnly = false\)/);
+  assert.match(js, /rfb\.viewOnly = connection\.viewOnly/);
+  assert.match(js, /state\.connection\.viewOnly = rfb\.viewOnly/);
+  assert.match(js, /connectTo\(failed\.device, failed\.viewOnly\)/);
+  assert.match(js, /connectTo\(\{ \.\.\.data, name: data\.host \}\)/);
+});
