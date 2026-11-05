@@ -549,6 +549,40 @@ test('a non-reading peer cannot accumulate unbounded Pong replies to masked Ping
   assert.equal((await recovered.nextFrame()).toString(), 'RFB 003.008\n');
 });
 
+test('a valid Ping survives moderate queued RFB output and receives its Pong', async t => {
+  const f = await fixture(t);
+  const ticket = await (await session(f)).json();
+  const wsAccepted = once(f.gateway.server, 'connection');
+  const rfbAccepted = once(f.rfb, 'connection');
+  const connected = await upgrade(f, ticket.wsPath);
+  const [ws] = await wsAccepted;
+  const [rfbSocket] = await rfbAccepted;
+  t.after(() => { ws.uncork(); connected.socket.destroy(); });
+  assert.equal((await connected.nextFrame()).toString(), 'RFB 003.008\n');
+
+  // Defer socket flushing to deterministically model a short-lived, normal
+  // framebuffer backlog, independently of the runner's TCP receive window.
+  ws.cork();
+  rfbSocket.write(Buffer.alloc(64 * 1024, 0x47));
+  for (let i = 0; i < 100 && ws.writableLength === 0; i++) {
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+  assert.ok(ws.writableLength >= 64 * 1024 && ws.writableLength < 128 * 1024,
+    `did not reproduce moderate framebuffer output backlog: ${ws.writableLength}B`);
+  connected.socket.write(maskedFrame('moderate-framebuffer', 9));
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(ws.destroyed, false, 'ordinary Ping must not disconnect a moderately backed-up session');
+  ws.uncork();
+  const frame = await connected.nextPacket();
+  assert.equal(frame.opcode, 2);
+  assert.equal(frame.body.length, 64 * 1024);
+  const pong = await connected.nextPacket();
+  assert.equal(pong.opcode, 10);
+  assert.equal(pong.body.toString(), 'moderate-framebuffer');
+  connected.socket.write(maskedBinary('session still usable'));
+  assert.equal((await connected.nextFrame()).toString(), 'session still usable');
+});
+
 test('unsolicited and stale Pong frames cannot satisfy a heartbeat challenge', async t => {
   const f = await fixture(t, { heartbeatMs: 100 });
   const ticket = await (await session(f)).json();
