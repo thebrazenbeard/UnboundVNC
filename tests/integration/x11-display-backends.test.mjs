@@ -49,6 +49,39 @@ function launch(t, command, args) {
   return { child, logTail: () => `${prefix}\n[tail]\n${tail}` };
 }
 
+// Independently check the X11 server's real pixels, not merely xsetroot's
+// successful exit code. XWD is supplied by Ubuntu's unmodified x11-apps.
+function assertX11RootPixels(display) {
+  const capture = spawnSync('xwd', ['-root', '-silent', '-display', display],
+    { timeout: 3000, maxBuffer: 1024 * 1024 });
+  assert.equal(capture.status, 0, 'independent XWD root capture failed');
+  const image = capture.stdout;
+  assert.ok(image.length >= 100, 'XWD header absent');
+  const u32 = index => image.readUInt32BE(index * 4);
+  const [headerSize, width, height, byteOrder, bpp, stride, colourCount] =
+    [0, 4, 5, 7, 11, 12, 19].map(u32);
+  assert.deepEqual([width, height, bpp], [WIDTH, HEIGHT, 32], 'XWD root geometry/format');
+  assert.ok(byteOrder === 0 || byteOrder === 1);
+  assert.ok(headerSize >= 100 && colourCount < 1024);
+  const channels = [u32(14), u32(15), u32(16)].map(mask => {
+    assert.ok(mask > 0, 'XWD true-colour channel mask');
+    const shift = Math.log2(mask & -mask);
+    return { mask, shift, max: mask >>> shift };
+  });
+  const start = headerSize + colourCount * 12;
+  assert.ok(image.length >= start + stride * height, 'XWD pixel data truncated');
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const offset = start + y * stride + x * 4;
+      const pixel = byteOrder === 0 ? image.readUInt32LE(offset) : image.readUInt32BE(offset);
+      const actual = channels.map(({ mask, shift, max }) => Math.round(((pixel & mask) >>> shift) * 255 / max));
+      assert.ok(actual.every((value, i) => value === COLOUR[i]),
+        `XWD oracle root pixel failed at (${x},${y}); no screen content logged`);
+    }
+  }
+  console.log(`independent XWD oracle: ${width * height} X11 root pixels verified`);
+}
+
 async function awaitPort(port, processInfo) {
   const deadline = Date.now() + TIMEOUT;
   while (Date.now() < deadline) {
@@ -120,6 +153,15 @@ async function startBackend(t, backend) {
   const scraper = launch(t, command, args);
   await awaitPort(port, scraper);
   assert.deepEqual(await listenerAndConnections(port), [], 'RFB readiness probe did not disconnect');
+  // Repaint after the scraper subscribes to the X display; force an exposure
+  // and verify the painted pixels using a separate X11 screen-dump utility.
+  const repaint = spawnSync('xsetroot', ['-display', display, '-solid', '#28914c'],
+    { encoding: 'utf8', timeout: 3000 });
+  assert.equal(repaint.status, 0, 'Xvfb repaint failed');
+  const refresh = spawnSync('xrefresh', ['-display', display], { encoding: 'utf8', timeout: 3000 });
+  assert.equal(refresh.status, 0, 'X11 exposure refresh failed');
+  await delay(300);
+  assertX11RootPixels(display);
   return port;
 }
 
@@ -259,7 +301,8 @@ async function qualifyRfb(origin, port, t, backend) {
     for (let p = 0; p < w * h; p++) {
       const word = init[6] ? pixels.readUInt32BE(p * 4) : pixels.readUInt32LE(p * 4);
       const actual = [init[14], init[15], init[16]].map(shift => (word >>> shift) & 255);
-      assert.deepEqual(actual, COLOUR, `${backend} root pixel mismatch at rect ${i}, pixel ${p}`);
+      assert.ok(actual.every((value, channel) => value === COLOUR[channel]),
+        `${backend} root pixel mismatch at rect ${i}, pixel ${p}; screen content not logged`);
       const index = (y + Math.floor(p / w)) * width + x + (p % w);
       assert.equal(coverage[index], 0, 'overlapping Raw rectangle');
       coverage[index] = 1;
