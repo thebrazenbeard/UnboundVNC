@@ -90,6 +90,12 @@ func TestNoProductionEnableOrListenerWithoutTrustedWindowsIPC(t *testing.T) {
 	if err := a.servePrivate(nil); !errors.Is(err, ErrNoTailnet) {
 		t.Fatalf("no tsnet server must not open a listener: %v", err)
 	}
+	server := boundedServer(a)
+	if server.ReadHeaderTimeout != 5*time.Second || server.ReadTimeout != 15*time.Second ||
+		server.WriteTimeout != 15*time.Second || server.IdleTimeout != 5*time.Second ||
+		server.MaxHeaderBytes != 8<<10 {
+		t.Fatal("private source candidate lost bounded HTTP request budgets")
+	}
 }
 
 func TestNoWildcardPublicOrArbitraryRouteConfig(t *testing.T) {
