@@ -157,7 +157,7 @@ async function startBackend(t, backend) {
   if (backend === 'x11vnc') {
     command = 'x11vnc';
     args = ['-norc', '-display', display, '-localhost', '-rfbport', String(port),
-      '-nopw', '-forever', '-shared', '-quiet', '-noxdamage'];
+      '-nopw', '-forever', '-shared', '-quiet', '-noxdamage', '-nocursor'];
   } else {
     command = 'X0tigervnc';
     // Direct X0tigervnc (unlike its wrapper) uses -Parameter=value syntax;
