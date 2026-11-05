@@ -151,7 +151,10 @@ async function run() {
     assert.equal(browserEvents.filter(event => event.type === 'pageerror').length, 0,
       'no uncaught errors during real stock RFB browser render');
 
-    await page.screenshot({ path: path.join(evidenceDir, 'stock-rfb-session.png'), fullPage: true });
+    // A fixed session view must be captured at viewport size; fullPage would
+    // stitch dashboard content outside the visible remote-session viewport.
+    await page.locator('#toasts .toast').waitFor({ state: 'hidden', timeout: 7_000 });
+    await page.screenshot({ path: path.join(evidenceDir, 'stock-rfb-session.png') });
     await writeFile(path.join(evidenceDir, 'framebuffer-pixel.json'),
       JSON.stringify({ fixture: 'stock Ubuntu Xtigervnc X11 root', rfbSecurity: 'None (loopback only)',
         expectedRgb: RGB, ...framebuffer, browser: browser.version() }, null, 2));
