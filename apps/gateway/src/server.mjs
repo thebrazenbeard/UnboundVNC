@@ -5,10 +5,9 @@ import { pathToFileURL } from 'node:url';
 
 const MAX_BODY = 1024;
 const MAX_FRAME = 1024 * 1024;
-const MAX_TRANSFER = 64 * 1024 * 1024;
+const MAX_BUFFERED = MAX_FRAME + 14;
 const TICKET_MS = 30_000;
-const IDLE_MS = 120_000;
-const MAX_LIFETIME_MS = 3_600_000;
+const HEARTBEAT_MS = 30_000;
 const MAX_SOCKETS = 8;
 
 function sendJson(res, status, value) {
@@ -43,13 +42,16 @@ function validOrigin(req, localPort) {
 }
 
 /** Local-only WebSocket/RFB bridge. Call gateway.listen() before using it. */
-export function createGateway({ port = 6081, host = '127.0.0.1', allowedPorts = [5900] } = {}) {
+export function createGateway({ port = 6081, host = '127.0.0.1', allowedPorts = [5900], heartbeatMs = HEARTBEAT_MS } = {}) {
   if (host !== '127.0.0.1' || !Number.isInteger(port) || port < 0 || port > 65535) {
     throw new Error('Gateway must bind to IPv4 loopback on a valid port');
   }
   if (!Array.isArray(allowedPorts) || allowedPorts.length === 0 || allowedPorts.length > 32 ||
       allowedPorts.some(p => !Number.isInteger(p) || p < 1 || p > 65535)) {
     throw new Error('Gateway requires a nonempty explicit allowlist of valid RFB TCP ports');
+  }
+  if (!Number.isInteger(heartbeatMs) || heartbeatMs < 10 || heartbeatMs > 300_000) {
+    throw new Error('Gateway requires a bounded WebSocket heartbeat interval');
   }
   const permittedPorts = new Set(allowedPorts);
   const tickets = new Map();
@@ -112,21 +114,17 @@ export function createGateway({ port = 6081, host = '127.0.0.1', allowedPorts = 
     let rejecting = false;
     let greeting = Buffer.alloc(0);
     let buffered = Buffer.alloc(0);
-    let inbound = 0;
-    let outbound = 0;
     let fragment = false;
-    let idleTimer;
-    let lifeTimer;
+    let heartbeatTimer;
+    let waitingForPong = false;
     function cleanup() {
       if (closed) return;
       closed = true;
-      clearTimeout(idleTimer);
-      clearTimeout(lifeTimer);
+      clearInterval(heartbeatTimer);
       connections.delete(cleanup);
       rfb.destroy();
       if (!rejecting) ws.destroy();
     }
-    function resetIdle() { clearTimeout(idleTimer); idleTimer = setTimeout(cleanup, IDLE_MS); idleTimer.unref(); }
     connections.add(cleanup);
     ws.on('error', cleanup);
     ws.on('close', cleanup);
@@ -142,8 +140,14 @@ export function createGateway({ port = 6081, host = '127.0.0.1', allowedPorts = 
       const accept = createHash('sha1').update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest('base64');
       ws.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
       upgraded = true;
-      resetIdle();
-      lifeTimer = setTimeout(cleanup, MAX_LIFETIME_MS); lifeTimer.unref();
+      // A quiet remote desktop is still an active session. Probe the browser
+      // instead of disconnecting solely because no framebuffer changed.
+      heartbeatTimer = setInterval(() => {
+        if (waitingForPong) return cleanup();
+        waitingForPong = true;
+        ws.write(frame(9, randomBytes(8)));
+      }, heartbeatMs);
+      heartbeatTimer.unref();
       if (head.length) ingest(head);
     }
     rfb.on('data', data => {
@@ -160,15 +164,13 @@ export function createGateway({ port = 6081, host = '127.0.0.1', allowedPorts = 
         data = greeting;
         greeting = Buffer.alloc(0);
       }
-      outbound += data.length;
-      if (outbound > MAX_TRANSFER) return cleanup();
-      resetIdle();
       if (!ws.write(frame(2, data))) rfb.pause();
     });
     ws.on('drain', () => rfb.resume());
     rfb.on('drain', () => ws.resume());
     ws.on('data', data => { if (upgraded && !closed) ingest(data); });
     function ingest(data) {
+      if (buffered.length + data.length > MAX_BUFFERED) return cleanup();
       buffered = Buffer.concat([buffered, data]);
       while (buffered.length >= 2) {
         const first = buffered[0];
@@ -193,15 +195,12 @@ export function createGateway({ port = 6081, host = '127.0.0.1', allowedPorts = 
         const payload = Buffer.from(buffered.subarray(header + 4, header + 4 + payloadSize));
         buffered = buffered.subarray(header + 4 + payloadSize);
         for (let i = 0; i < payload.length; i++) payload[i] ^= mask[i % 4];
-        resetIdle();
         if (opcode === 8) { ws.write(frame(8)); return cleanup(); }
         if (opcode === 9) { if (payload.length > 125 || !fin) return cleanup(); ws.write(frame(10, payload)); continue; }
-        if (opcode === 10) { if (payload.length > 125 || !fin) return cleanup(); continue; }
+        if (opcode === 10) { if (payload.length > 125 || !fin) return cleanup(); waitingForPong = false; continue; }
         if (opcode !== 2 && opcode !== 0) return cleanup();
         if (opcode === 0 && !fragment || opcode === 2 && fragment) return cleanup();
         fragment = !fin;
-        inbound += payload.length;
-        if (inbound > MAX_TRANSFER) return cleanup();
         if (!rfb.write(payload)) ws.pause();
       }
     }
