@@ -128,7 +128,10 @@ internal static class Program
                     "PORT_5901_NOT_EXCLUSIVELY_LOOPBACK");
                 Console.WriteLine("HOST_START_LOOPBACK_ONLY=PASS");
 
-                using var client = new TcpClient { ReceiveTimeout = 5000, SendTimeout = 5000 };
+                // Keep the receive window small for a later bounded 3.6 MB
+                // unconsumed Raw update; never expose the listener externally.
+                using var client = new TcpClient { ReceiveTimeout = 5000,
+                    SendTimeout = 5000, ReceiveBufferSize = 4096 };
                 client.Connect(IPAddress.Loopback, 5901);
                 using var stream = client.GetStream();
                 Thread.Sleep(200);
@@ -174,12 +177,46 @@ internal static class Program
                 ValidateRawPatternRequest(stream, regionX, regionY, second);
                 Console.WriteLine("SAME_RFB_SESSION_SECOND_RAW_32x24_CHANGED_PIXELS=PASS");
 
+                // Exercise Stop while a larger framebuffer update is already
+                // visible on the wire. Cover the *whole* requested frame with
+                // our test-owned opaque window before allowing screen capture.
+                marker.Bounds = new Rectangle(bounds.Left, bounds.Top, frameWidth, frameHeight);
+                marker.Refresh();
+                int[] frameOwnershipMatches = new int[4];
+                bool frameOwned = TestOwnedWindowCoversFrame(marker, bounds, frameWidth,
+                    frameHeight, activePattern, frameOwnershipMatches);
+                if (!frameOwned)
+                {
+                    // Geometry and color-match counts only, never screen pixels.
+                    Point origin = marker.PointToScreen(Point.Empty);
+                    Console.WriteLine($"OWNED_FULL_FRAME_CLIENT_SIZE={marker.ClientSize.Width}x{marker.ClientSize.Height}");
+                    Console.WriteLine($"OWNED_FULL_FRAME_ORIGIN_DELTA={origin.X - bounds.Left},{origin.Y - bounds.Top}");
+                    Console.WriteLine($"OWNED_FULL_FRAME_QUADRANT_MATCH_COUNTS={string.Join(",", frameOwnershipMatches)}");
+                }
+                Require(frameOwned, "FULL_FRAME_NOT_OWNED_BY_TEST_WINDOW");
+                SendFullFrameUpdateRequest(stream, frameWidth, frameHeight);
+                Require(ReadExact(stream, 4).SequenceEqual(new byte[] { 0, 0, 0, 1 }),
+                    "LARGE_UPDATE_HEADER_INVALID");
+                var largeRectangle = ReadExact(stream, 12);
+                Require(BinaryPrimitives.ReadUInt16BigEndian(largeRectangle.AsSpan(0, 2)) == 0 &&
+                    BinaryPrimitives.ReadUInt16BigEndian(largeRectangle.AsSpan(2, 2)) == 0 &&
+                    BinaryPrimitives.ReadUInt16BigEndian(largeRectangle.AsSpan(4, 2)) == frameWidth &&
+                    BinaryPrimitives.ReadUInt16BigEndian(largeRectangle.AsSpan(6, 2)) == frameHeight &&
+                    BinaryPrimitives.ReadUInt32BigEndian(largeRectangle.AsSpan(8, 4)) == 0,
+                    "LARGE_RAW_RECTANGLE_INVALID");
+                Require(WaitUntil(() => client.Available > 0, TimeSpan.FromSeconds(3)),
+                    "LARGE_RAW_PAYLOAD_NOT_IN_RECEIVE_BUFFER");
+                Console.WriteLine("ACTIVE_LARGE_TEST_OWNED_RAW_UPDATE=OBSERVED_BEFORE_STOP");
+
+                var stopTimer = Stopwatch.StartNew();
                 ClickOwnedButton(host!, window, "Stop and revoke");
-                Require(WaitUntil(() => !IsPort5901Listening(), TimeSpan.FromSeconds(5)),
+                Require(WaitUntil(() => !IsPort5901Listening(), TimeSpan.FromSeconds(3)),
                     "LISTENER_STILL_OPEN_AFTER_STOP");
-                Require(NoFramebufferAfterStop(stream, regionX, regionY),
-                    "POST_STOP_RFB_FRAME_OR_OPEN_PEER");
+                Require(stopTimer.Elapsed < TimeSpan.FromSeconds(4), "STOP_BLOCKED_BY_LARGE_SEND");
+                Require(OnlyPriorFrameBufferThenClosed(stream, client, frameWidth, frameHeight),
+                    "POST_STOP_NEW_FRAME_OR_UNBOUNDED_PEER");
                 Console.WriteLine("POST_STOP_FRAMEBUFFER_REQUEST_DENIED=PASS");
+                Console.WriteLine("STOP_DURING_LARGE_UNCONSUMED_FRAME=BOUNDED_TEARDOWN_PASS");
                 Console.WriteLine("STOP_REVOKES_SESSION_AND_LISTENER=PASS");
                 Console.WriteLine("HOSTED_RFB=PASS_SYNTHETIC_CI_VIEW_ONLY");
                 return 0;
@@ -344,24 +381,72 @@ internal static class Program
         return bytes;
     }
 
-    private static bool PeerClosedAfterStop(NetworkStream stream)
+    private static void SendFullFrameUpdateRequest(NetworkStream stream, int width, int height)
     {
-        try { return stream.ReadByte() == -1; }
-        catch (IOException ex) when (ex.InnerException is SocketException socket &&
-            socket.SocketErrorCode is SocketError.ConnectionReset or SocketError.ConnectionAborted)
-        { return true; }
+        byte[] request = { 3, 0, 0, 0, 0, 0,
+            (byte)(width >> 8), (byte)width, (byte)(height >> 8), (byte)height };
+        stream.Write(request);
     }
 
-    private static bool NoFramebufferAfterStop(NetworkStream stream, int x, int y)
+    private static bool TestOwnedWindowCoversFrame(Form marker, Rectangle screen,
+        int width, int height, Color[] pattern, int[] matches)
     {
-        // New full update requested only AFTER Stop has closed its listener.
-        // Success requires a peer-close/reset, never a buffered Raw frame byte.
-        byte[] request = { 3, 0, (byte)(x >> 8), (byte)x, (byte)(y >> 8), (byte)y,
-            0, OracleWidth, 0, OracleHeight };
-        try { stream.Write(request); }
-        catch (IOException) { return true; } // Closed TCP stream cannot accept a frame.
+        Array.Clear(matches);
+        Point origin = marker.PointToScreen(Point.Empty);
+        if (origin.X != screen.Left || origin.Y != screen.Top ||
+            marker.ClientSize.Width < width || marker.ClientSize.Height < height) return false;
+        // A four-point check could miss an unrelated overlay between samples.
+        // Before ANY large RFB request, inspect EVERY on-screen pixel and
+        // require only the known four test-owned colors, without logging them.
+        using var bitmap = new Bitmap(width, height);
+        using (var graphics = Graphics.FromImage(bitmap))
+            graphics.CopyFromScreen(screen.Left, screen.Top, 0, 0, new Size(width, height));
+        bool owned = true;
+        for (int y = 0; y < height; y++)
+        for (int x = 0; x < width; x++)
+        {
+            int quadrant = (y < marker.ClientSize.Height / 2 ? 0 : 2) +
+                (x < marker.ClientSize.Width / 2 ? 0 : 1);
+            Color actual = bitmap.GetPixel(x, y);
+            Color expected = pattern[quadrant];
+            if (actual.R == expected.R && actual.G == expected.G && actual.B == expected.B)
+                matches[quadrant]++;
+            else owned = false;
+        }
+        return owned;
+    }
+
+    private static bool OnlyPriorFrameBufferThenClosed(NetworkStream stream, TcpClient client,
+        int width, int height)
+    {
+        // A partially sent Raw frame can already be in TCP buffers when Stop
+        // wins. We can bound/drain those bytes, not retroactively erase them.
+        // A new full update is requested AFTER Stop; no extra rectangle may
+        // follow the at-most width*height*4 pending bytes of the prior frame.
+        try { SendFullFrameUpdateRequest(stream, width, height); }
+        catch (IOException) { return true; }
         catch (ObjectDisposedException) { return true; }
-        return PeerClosedAfterStop(stream);
+        int maximumPriorBytes = checked(width * height * 4);
+        int observed = 0;
+        var buffer = new byte[16 * 1024];
+        var end = Stopwatch.StartNew();
+        client.ReceiveTimeout = 500;
+        while (end.Elapsed < TimeSpan.FromSeconds(8))
+        {
+            try
+            {
+                int count = stream.Read(buffer);
+                if (count == 0) return true;
+                observed += count;
+                if (observed > maximumPriorBytes) return false;
+            }
+            catch (IOException ex) when (ex.InnerException is SocketException socket &&
+                socket.SocketErrorCode == SocketError.TimedOut) { }
+            catch (IOException ex) when (ex.InnerException is SocketException socket &&
+                socket.SocketErrorCode is SocketError.ConnectionReset or SocketError.ConnectionAborted or SocketError.Shutdown)
+            { return true; }
+        }
+        return false;
     }
 
     private static bool IsPort5901Listening() =>
