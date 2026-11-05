@@ -227,6 +227,12 @@ async function run() {
       JSON.stringify({ fixture: 'stock Ubuntu Xtigervnc X11 root', rfbSecurity: 'None (loopback only)',
         expectedRgb: RGB, ...framebuffer, browser: browser.version() }, null, 2));
 
+    // A deliberate local View only choice must survive the *same endpoint's*
+    // Retry after an unexpected remote close. It must not silently switch to
+    // sending pointer/keyboard input because a new noVNC instance was made.
+    await page.getByRole('button', { name: 'View only', exact: true }).click();
+    assert.equal(await page.locator('#session-viewonly').getAttribute('aria-pressed'), 'true');
+
     // An abrupt server disappearance should restore the dashboard's retry UI.
     // Reconnect is a new session and never reuses a VNC password.
     await stopTiger(tiger);
@@ -259,7 +265,8 @@ async function run() {
       return Array.from(pixel.subarray(0, 3)).every((value, i) => value === expected[i]);
     }, RECONNECTED_RGB, { timeout: 15_000 });
     assert.ok(await secondPixel.jsonValue(), 'replacement independent framebuffer color missing');
-    assert.equal(await page.locator('#session-viewonly').getAttribute('aria-pressed'), 'false');
+    assert.equal(await page.locator('#session-viewonly').getAttribute('aria-pressed'), 'true',
+      'Retry of the same endpoint must preserve the previous View only preference');
     assert.equal(await page.locator('#session-scale').getAttribute('aria-pressed'), 'true');
     assert.equal(await page.locator('#credentials-dialog').isVisible(), false);
     assert.equal(await page.evaluate(() => /password|credentials|token/i.test(JSON.stringify(localStorage))), false);
@@ -277,6 +284,12 @@ async function run() {
     assert.equal(await page.locator('#session-view').isVisible(), false, 'disconnect returns to dashboard');
     assert.equal(await page.locator('#connection-error').isVisible(), false,
       'explicit user Disconnect must not be misclassified as remote session failure');
+    // Starting a fresh connection intentionally differs from pressing Retry.
+    await page.locator('#quick-form button[type="submit"]').click();
+    await page.getByText('Connected · identity unverified').waitFor({ timeout: 15_000 });
+    assert.equal(await page.locator('#session-viewonly').getAttribute('aria-pressed'), 'false',
+      'a new connection should retain its documented default input behavior');
+    await page.getByRole('button', { name: 'Disconnect', exact: true }).click();
     succeeded = true;
     console.log(JSON.stringify({ outcome: 'PASS', browser: browser.version(), gatewayOrigin,
       rfbPort, framebuffer, desktopFit, mobileFit, mobileReconnected,

@@ -167,8 +167,9 @@ function renderConnectionError() {
   panel.hidden = !state.lastFailure;
 }
 
-function showConnectionFailure(device, message) {
-  state.lastFailure = { device, message };
+function showConnectionFailure(device, message, viewOnly = false) {
+  // Retry state is in memory only; saved device profiles never include it.
+  state.lastFailure = { device, message, viewOnly };
   renderConnectionError();
 }
 
@@ -177,7 +178,7 @@ function clearConnectionFailure() {
   renderConnectionError();
 }
 
-function showSession(device) {
+function showSession(device, viewOnly = false) {
   state.sessionReturnFocus = captureFocus(document.activeElement);
   clearConnectionFailure();
   document.querySelector('#session-name').textContent = device.name;
@@ -187,9 +188,9 @@ function showSession(device) {
   document.querySelector('.application').inert = true;
   document.body.classList.add('session-active');
   document.querySelector('#session-disconnect').focus({ preventScroll: true });
-  document.querySelector('#session-viewonly').classList.remove('active');
+  document.querySelector('#session-viewonly').classList.toggle('active', viewOnly);
   document.querySelector('#session-focus-remote').disabled = true;
-  document.querySelector('#session-viewonly').setAttribute('aria-pressed', 'false');
+  document.querySelector('#session-viewonly').setAttribute('aria-pressed', String(viewOnly));
   document.querySelector('#session-scale').classList.add('active');
   document.querySelector('#session-scale').setAttribute('aria-pressed', 'true');
 }
@@ -224,14 +225,14 @@ function disconnect() {
   hideSession();
 }
 
-async function connectTo(device) {
+async function connectTo(device, viewOnly = false) {
   if (state.connection) disconnect();
   let target;
   try { target = validateDevice(device); }
   catch (error) { notify(error.message, 'error'); return; }
-  showSession(target);
+  showSession(target, viewOnly);
   const connection = {
-    device, target, rfb: null, manual: false, abortController: new AbortController(),
+    device, target, rfb: null, manual: false, viewOnly, abortController: new AbortController(),
     verificationReady: false, pendingFingerprint: null, verifiedFingerprint: null,
     identityChanged: false, verificationAttempt: 0,
   };
@@ -256,14 +257,14 @@ async function connectTo(device) {
     const rfb = new RFB(document.querySelector('#remote-screen'), url.href);
     connection.rfb = rfb;
     rfb.scaleViewport = true;
-    rfb.viewOnly = false;
+    rfb.viewOnly = connection.viewOnly;
     rfb.addEventListener('connect', () => {
       if (state.connection !== connection) return;
       try {
         requirePinnedIdentity(readServerPin(window.localStorage, trustedEndpoint(target)), connection.verifiedFingerprint);
       } catch (error) {
         disconnect();
-        showConnectionFailure(device, error.message);
+        showConnectionFailure(device, error.message, connection.viewOnly);
         notify(error.message, 'error');
         return;
       }
@@ -283,7 +284,7 @@ async function connectTo(device) {
         requirePinnedIdentity(readServerPin(window.localStorage, trustedEndpoint(target)), connection.verifiedFingerprint);
       } catch (error) {
         disconnect();
-        showConnectionFailure(device, error.message);
+        showConnectionFailure(device, error.message, connection.viewOnly);
         notify(error.message, 'error');
         return;
       }
@@ -325,7 +326,7 @@ async function connectTo(device) {
       } catch (error) {
         if (state.connection !== connection || connection.verificationAttempt !== attempt) return;
         disconnect();
-        showConnectionFailure(device, `Could not verify server identity: ${error.message}`);
+        showConnectionFailure(device, `Could not verify server identity: ${error.message}`, connection.viewOnly);
         notify(`Could not verify server identity: ${error.message}`, 'error');
       }
     });
@@ -342,14 +343,14 @@ async function connectTo(device) {
       // WebSocket close may be `clean`. Only our explicit Disconnect path is
       // user-initiated, and it clears state.connection before this event.
       const message = connection.failureMessage || 'Remote connection ended unexpectedly.';
-      showConnectionFailure(device, message);
+      showConnectionFailure(device, message, connection.viewOnly);
       notify(message, 'error');
     });
   } catch (error) {
     if (state.connection !== connection) return;
     state.connection = null;
     hideSession();
-    showConnectionFailure(device, error?.message || 'Connection failed.');
+    showConnectionFailure(device, error?.message || 'Connection failed.', connection.viewOnly);
     notify(error?.message || 'Connection failed.', 'error');
   }
 }
@@ -413,7 +414,8 @@ document.getElementById('quick-form').addEventListener('submit', event => {
   connectTo({ ...data, name: data.host });
 });
 document.getElementById('connection-retry').addEventListener('click', () => {
-  if (state.lastFailure) connectTo(state.lastFailure.device);
+  const failed = state.lastFailure;
+  if (failed) connectTo(failed.device, failed.viewOnly);
 });
 document.getElementById('connection-error-dismiss').addEventListener('click', clearConnectionFailure);
 document.addEventListener('keydown', event => {
@@ -432,6 +434,7 @@ document.getElementById('session-viewonly').addEventListener('click', event => {
   const rfb = state.connection?.rfb;
   if (!rfb) return;
   rfb.viewOnly = !rfb.viewOnly;
+  state.connection.viewOnly = rfb.viewOnly;
   event.currentTarget.classList.toggle('active', rfb.viewOnly);
   event.currentTarget.setAttribute('aria-pressed', String(rfb.viewOnly));
   notify(rfb.viewOnly ? 'View-only enabled in this viewer.' : 'Mouse and keyboard enabled in this viewer.');
@@ -477,7 +480,7 @@ document.getElementById('identity-approve').addEventListener('click', () => {
     // A storage failure may be a concurrent change to an existing pin. Do not
     // allow a successful user click to bypass an unresolved mismatch.
     disconnect();
-    showConnectionFailure(connection.device, `Cannot establish remembered server identity: ${error.message}`);
+    showConnectionFailure(connection.device, `Cannot establish remembered server identity: ${error.message}`, connection.viewOnly);
     notify(`Cannot establish remembered server identity: ${error.message}`, 'error');
     return;
   }
