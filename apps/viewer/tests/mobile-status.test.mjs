@@ -20,3 +20,10 @@ test('source offers persistent connection failure, retry and dismiss controls', 
   assert.match(js, /id="connection-retry"[^>]*type="button"/);
   assert.match(js, /id="connection-error-dismiss"[^>]*type="button"/);
 });
+
+test('source offers a keyboard-reachable way back to the noVNC canvas after focusing toolbar', () => {
+  const js = readFileSync(new URL('../src/main.js', import.meta.url), 'utf8');
+  assert.match(js, /id="session-focus-remote"[^>]*aria-label="Focus remote desktop"/);
+  assert.match(js, /getElementById\('session-focus-remote'\)\.addEventListener\('click'/);
+  assert.match(js, /state\.connection\?\.rfb\?\.focus\(\{ preventScroll: true \}\)/);
+});
