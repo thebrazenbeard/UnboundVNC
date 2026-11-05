@@ -67,6 +67,16 @@ internal static class Program
             marker.Refresh(); // Force our Paint callback before the independent screen oracle.
             Application.DoEvents();
             Thread.Sleep(350);
+            // Windows may enforce a minimum Form client width (136 on the
+            // hosted runner despite Size=100). Use the *actual* painted client
+            // center, not the requested geometry, for screen and RFB sampling.
+            Point center = marker.PointToScreen(new Point(
+                marker.ClientSize.Width / 2, marker.ClientSize.Height / 2));
+            x = center.X - bounds.Left;
+            y = center.Y - bounds.Top;
+            Require(x >= OracleWidth / 2 && y >= OracleHeight / 2 &&
+                x + OracleWidth / 2 <= frameWidth &&
+                y + OracleHeight / 2 <= frameHeight, "TEST_OWNED_WINDOW_OUTSIDE_FRAMEBUFFER");
             // The oracle is an independently captured 32x24 desktop rectangle
             // from a runner-owned WinForms window, not bytes manufactured by RFB.
             byte[]? oracle = null;
