@@ -11,7 +11,8 @@ async function fixture(t) {
     socket.on('data', data => socket.write(data));
   });
   await new Promise(resolve => rfb.listen(0, '127.0.0.1', resolve));
-  const gateway = createGateway({ port: 0 });
+  // Production default only permits 5900. Isolate this test's ephemeral RFB fixture.
+  const gateway = createGateway({ port: 0, allowedPorts: [rfb.address().port] });
   const url = await gateway.listen();
   t.after(async () => { await gateway.close(); await new Promise(resolve => rfb.close(resolve)); });
   return { url, origin: url, port: rfb.address().port };
@@ -100,6 +101,7 @@ test('rejects external targets, invalid ports, CSRF origins, and missing origins
     { host: 'localhost', port: 0 },
     { host: '127.0.0.1', port: 65536 },
   ]) assert.equal((await session(f, target)).status, 400);
+  assert.equal((await session(f, { host: '127.0.0.1', port: f.port + (f.port === 65535 ? -1 : 1) })).status, 403);
   assert.equal((await session(f, undefined, { Origin: 'https://attacker.example' })).status, 403);
   assert.equal((await session(f, undefined, { Origin: '' })).status, 403);
   assert.equal((await session(f, undefined, { 'content-type': 'text/plain' })).status, 403);
@@ -136,4 +138,23 @@ test('rejects cross-origin WS handshake without exposing consumed ticket', async
 
 test('refuses non-loopback bind', () => {
   assert.throws(() => createGateway({ host: '0.0.0.0' }), /loopback/);
+  assert.throws(() => createGateway({ allowedPorts: [] }), /allowlist/);
+  assert.throws(() => createGateway({ allowedPorts: [0] }), /allowlist/);
+});
+
+test('only standard VNC port 5900 is allowed by default', async t => {
+  const gateway = createGateway({ port: 0 });
+  const url = await gateway.listen();
+  t.after(async () => gateway.close());
+  const nonVnc = await fetch(`${url}/api/sessions`, {
+    method: 'POST', headers: { Origin: url, 'content-type': 'application/json' },
+    body: JSON.stringify({ host: 'localhost', port: 8080 }),
+  });
+  assert.equal(nonVnc.status, 403);
+  assert.deepEqual(await nonVnc.json(), { error: 'target_port_not_allowed' });
+  const standardVnc = await fetch(`${url}/api/sessions`, {
+    method: 'POST', headers: { Origin: url, 'content-type': 'application/json' },
+    body: JSON.stringify({ host: 'localhost', port: 5900 }),
+  });
+  assert.equal(standardVnc.status, 201);
 });
