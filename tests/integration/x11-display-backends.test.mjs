@@ -30,8 +30,13 @@ async function unusedPort() {
 function launch(t, command, args) {
   const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
   let tail = '';
+  let prefix = '';
   for (const stream of [child.stdout, child.stderr]) {
-    stream.on('data', chunk => { tail = (tail + chunk.toString()).slice(-2400); });
+    stream.on('data', chunk => {
+      const content = chunk.toString();
+      prefix = (prefix + content).slice(0, 800);
+      tail = (tail + content).slice(-1600);
+    });
   }
   child.on('error', error => { tail = `spawn error: ${error.message}`; });
   t.after(async () => {
@@ -41,7 +46,7 @@ function launch(t, command, args) {
       if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
     }
   });
-  return { child, logTail: () => tail };
+  return { child, logTail: () => `${prefix}\n[tail]\n${tail}` };
 }
 
 async function awaitPort(port, processInfo) {
@@ -107,8 +112,10 @@ async function startBackend(t, backend) {
       '-nopw', '-forever', '-shared', '-quiet', '-noxdamage'];
   } else {
     command = 'X0tigervnc';
-    args = ['-display', display, '-rfbport', String(port), '-SecurityTypes', 'None',
-      '-localhost', 'yes', '-interface', '127.0.0.1', '-AlwaysShared'];
+    // Direct X0tigervnc (unlike its wrapper) uses -Parameter=value syntax;
+    // a bare `yes` following `-localhost` is an invalid extra parameter.
+    args = [`-display=${display}`, `-rfbport=${port}`, '-SecurityTypes=None',
+      '-localhost', '-interface=127.0.0.1', '-AlwaysShared'];
   }
   const scraper = launch(t, command, args);
   await awaitPort(port, scraper);
@@ -225,7 +232,9 @@ async function qualifyRfb(origin, port, t, backend) {
   const height = init.readUInt16BE(2);
   assert.deepEqual([width, height], [WIDTH, HEIGHT]);
   assert.equal(init[4], 32, 'expected 32 bits per pixel on Xvfb depth 24');
-  assert.equal(init[7], 1, 'expected true-colour pixels');
+  // RFC 6143 defines true-colour as a nonzero flag, not necessarily byte 1.
+  // libvncserver/x11vnc reports 255 here; verify the full pixel masks below.
+  assert.notEqual(init[7], 0, 'expected true-colour pixels');
   assert.deepEqual([init.readUInt16BE(8), init.readUInt16BE(10), init.readUInt16BE(12)], [255, 255, 255]);
   const nameLength = init.readUInt32BE(20);
   assert.ok(nameLength > 0 && nameLength <= 4096);
