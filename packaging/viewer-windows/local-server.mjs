@@ -11,9 +11,11 @@ const MIME = new Map([
   ['.png', 'image/png'], ['.ico', 'image/x-icon'], ['.woff2', 'font/woff2'],
 ]);
 const LOOPBACK = '127.0.0.1';
+const MAX_PENDING_HTTP_SOCKETS = 16;
+const HTTP_ADMISSION_DEADLINE_MS = 5000;
 
 function reject(res, status) {
-  res.writeHead(status, { 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+  res.writeHead(status, { 'connection': 'close', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
   res.end();
 }
 
@@ -25,12 +27,21 @@ export async function startLocalViewer({ staticRoot, createGateway, allowedPorts
   const gatewayUrl = new URL(await gateway.listen());
   let viewerPort;
   const bridges = new Set();
+  const pendingHttpSockets = new Set();
+  const headerDeadlines = new WeakMap();
   let closing = false;
+
+  function releasePending(socket) {
+    pendingHttpSockets.delete(socket);
+    const deadline = headerDeadlines.get(socket);
+    if (deadline) clearTimeout(deadline);
+    headerDeadlines.delete(socket);
+  }
 
   const sameHost = req => req.headers.host === `${LOOPBACK}:${viewerPort}`;
   const sameOrigin = req => req.headers.origin === `http://${LOOPBACK}:${viewerPort}`;
   const headers = () => ({
-    'cache-control': 'no-store', 'x-content-type-options': 'nosniff',
+    'connection': 'close', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff',
     'referrer-policy': 'no-referrer',
     'content-security-policy': `default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' ws://${LOOPBACK}:${viewerPort}; base-uri 'none'; form-action 'self'; frame-ancestors 'none'`,
   });
@@ -71,6 +82,21 @@ export async function startLocalViewer({ staticRoot, createGateway, allowedPorts
     } catch { reject(res, 404); }
   });
 
+  // These sockets terminate at the desktop viewer, *before* the protected
+  // gateway. Its admission limits cannot bound incomplete viewer HTTP headers.
+  // Keep HTTP responses one-request-per-socket so keep-alive cannot monopolize
+  // the bounded pre-upgrade pool; accepted WS sessions are released separately.
+  server.maxRequestsPerSocket = 1;
+  server.on('connection', socket => {
+    if (pendingHttpSockets.size >= MAX_PENDING_HTTP_SOCKETS) return socket.destroy();
+    pendingHttpSockets.add(socket);
+    // Absolute since TCP accept: trickling bytes cannot reset this deadline.
+    const deadline = setTimeout(() => socket.destroy(), HTTP_ADMISSION_DEADLINE_MS);
+    deadline.unref();
+    headerDeadlines.set(socket, deadline);
+    socket.once('close', () => releasePending(socket));
+  });
+
   server.on('upgrade', (req, socket, head) => {
     if (closing || !sameHost(req) || !sameOrigin(req) || req.method !== 'GET' ||
         !/^\/ws\/session\/[A-Za-z0-9_-]{43}$/.test(req.url ?? '') ||
@@ -79,6 +105,9 @@ export async function startLocalViewer({ staticRoot, createGateway, allowedPorts
       socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
       return;
     }
+    // A validated local WS upgrade graduates out of HTTP admission. It is
+    // still subject to the separate gateway's one-use ticket and session cap.
+    releasePending(socket);
     // Keep all raw WS bytes and framing in the reviewed gateway. Rewrite only
     // the boundary Host/Origin to its private ephemeral loopback endpoint.
     const upstream = tcpConnect({ host: LOOPBACK, port: Number(gatewayUrl.port) });
@@ -115,6 +144,7 @@ export async function startLocalViewer({ staticRoot, createGateway, allowedPorts
     async close() {
       if (closing) return;
       closing = true;
+      for (const socket of pendingHttpSockets) socket.destroy();
       for (const socket of bridges) socket.destroy();
       server.closeAllConnections();
       await Promise.all([
