@@ -4,27 +4,47 @@ namespace UnboundVnc.Host.Windows;
 
 internal static class PendingConsentMonitor
 {
+    // A silent local peer must not monopolize the host's sole consent slot.
+    private static readonly TimeSpan DefaultPendingConsentTimeout = TimeSpan.FromSeconds(30);
+
     internal static Task<bool> ApproveWhileConnected(
         Socket socket, Func<CancellationToken, Task<bool>> approve, CancellationToken lifetime)
-        => ApproveWhileConnected(socket, approve, lifetime,
+        => ApproveWhileConnected(socket, approve, lifetime, DefaultPendingConsentTimeout,
+            static cancellation => Task.Delay(50, cancellation));
+
+    // The timeout overload permits short, deterministic loopback regression tests.
+    internal static Task<bool> ApproveWhileConnected(
+        Socket socket, Func<CancellationToken, Task<bool>> approve, CancellationToken lifetime,
+        TimeSpan pendingConsentTimeout)
+        => ApproveWhileConnected(socket, approve, lifetime, pendingConsentTimeout,
             static cancellation => Task.Delay(50, cancellation));
 
     // The injected delay lets the loopback harness hold an exact gap after a clear poll.
-    internal static async Task<bool> ApproveWhileConnected(
+    internal static Task<bool> ApproveWhileConnected(
         Socket socket, Func<CancellationToken, Task<bool>> approve, CancellationToken lifetime,
         Func<CancellationToken, Task> pauseAfterIdlePoll)
+        => ApproveWhileConnected(socket, approve, lifetime, DefaultPendingConsentTimeout,
+            pauseAfterIdlePoll);
+
+    private static async Task<bool> ApproveWhileConnected(
+        Socket socket, Func<CancellationToken, Task<bool>> approve, CancellationToken lifetime,
+        TimeSpan pendingConsentTimeout, Func<CancellationToken, Task> pauseAfterIdlePoll)
     {
+        if (pendingConsentTimeout <= TimeSpan.Zero)
+            throw new ArgumentOutOfRangeException(nameof(pendingConsentTimeout));
         using var pending = CancellationTokenSource.CreateLinkedTokenSource(lifetime);
+        pending.CancelAfter(pendingConsentTimeout);
         var peerLost = ObserveDisconnectOrEarlyData(socket, pending.Token, pauseAfterIdlePoll);
         try
         {
             var decision = approve(pending.Token);
             if (await Task.WhenAny(decision, peerLost).ConfigureAwait(false) == peerLost)
-                pending.Cancel(); // Reject and dismiss the prompt if the peer has gone away.
+                return false; // Disconnect, early bytes or deadline: no approval can survive.
 
             bool accepted = await decision.ConfigureAwait(false);
+            bool pendingCurrent = !pending.IsCancellationRequested;
             pending.Cancel(); // End monitoring before any RFB handshake begins.
-            if (!accepted || await peerLost.ConfigureAwait(false)) return false;
+            if (!accepted || !pendingCurrent || await peerLost.ConfigureAwait(false)) return false;
             // Recheck after the canceled poll gap. This is a boundary snapshot;
             // subsequent disconnects are handled by the RFB socket operations.
             return !HasEarlyDataOrClosed(socket);
