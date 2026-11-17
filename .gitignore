@@ -4,8 +4,6 @@ coverage/
 .cache/
 .vite/
 *.log
-.env
-.env.*
 !.env.example
 *.pem
 *.key
@@ -13,3 +11,4 @@ coverage/
 *.pfx
 .DS_Store
 Thumbs.db
+config.bat
