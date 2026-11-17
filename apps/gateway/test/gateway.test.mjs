@@ -447,6 +447,22 @@ test('rejects a non-RFB localhost service even on an explicitly allowed port', a
   assert.match(attempt.response, /^HTTP\/1\.1 403/);
 });
 
+test('rejects an RFB-looking banner with the high bit set on every byte', async t => {
+  // Buffer#toString('ascii') masks the high bit. An invalid non-ASCII banner
+  // must not pass protocol identification just because stripping 0x80 looks RFB.
+  const invalid = Buffer.from('RFB 003.008\n', 'ascii').map(byte => byte | 0x80);
+  const fake = createTcpServer(socket => socket.write(invalid));
+  await new Promise(resolve => fake.listen(0, '127.0.0.1', resolve));
+  const targetPort = fake.address().port;
+  const gateway = createGateway({ port: 0, allowedPorts: [targetPort] });
+  const url = await gateway.listen();
+  t.after(async () => { await gateway.close(); await new Promise(resolve => fake.close(resolve)); });
+  const ticket = await (await session({ url, origin: url, port: targetPort })).json();
+  const attempt = await upgrade({ url, origin: url }, ticket.wsPath);
+  t.after(() => attempt.socket.destroy());
+  assert.match(attempt.response, /^HTTP\/1\.1 403/);
+});
+
 test('a trickling RFB banner cannot extend the upstream handshake deadline', async t => {
   const upstream = createTcpServer(socket => {
     socket.on('error', () => {});
