@@ -47,6 +47,7 @@ test('viewer assets are served on a random loopback port with restrictive CSP', 
   const page = await call('/');
   assert.equal(page.status, 200);
   assert.match(page.body, /Local desktop fixture/);
+  assert.equal(page.headers.connection, 'close');
   assert.match(page.headers['content-security-policy'], /default-src 'none'/);
   assert.equal((await call('/assets/viewer.js')).status, 200);
   assert.equal((await call('/does-not-exist')).status, 404);
@@ -62,6 +63,7 @@ test('HTTP host spoof and unsafe API origin cannot access local session issuance
 test('gateway is alive only through wrapper and still enforces allowed RFB ports', async () => {
   const health = await call('/api/health');
   assert.equal(health.status, 200);
+  assert.equal(health.headers.connection, 'close');
   assert.equal(JSON.parse(health.body).remoteAccess, false);
   const headers = { Origin: wrapper.url.slice(0, -1), 'content-type': 'application/json' };
   const badPort = await call('/api/sessions', { method: 'POST', headers, body: '{"host":"127.0.0.1","port":23456}' });
@@ -86,6 +88,46 @@ test('untrusted WebSocket origin is rejected before reaching gateway', async () 
     ].join('\r\n')));
   });
   assert.match(reply, /^HTTP\/1\.1 403 Forbidden/);
+});
+
+test('desktop HTTP wrapper caps incomplete-header sockets before gateway admission', async () => {
+  const sockets = [];
+  try {
+    const port = Number(new URL(wrapper.url).port);
+    let closed = 0;
+    for (let i = 0; i < 24; i++) {
+      const socket = connectTcp({ host: '127.0.0.1', port });
+      socket.on('error', () => {});
+      socket.once('close', () => { closed += 1; });
+      sockets.push(socket);
+      socket.write('G'); // Incomplete HTTP request; never reaches the backend gateway.
+    }
+    await new Promise(resolve => setTimeout(resolve, 200));
+    assert.ok(24 - closed <= 16, `desktop wrapper retained ${24 - closed} incomplete sockets`);
+  } finally {
+    const closed = sockets.map(socket => socket.destroyed ? Promise.resolve() :
+      new Promise(resolve => socket.once('close', resolve)));
+    for (const socket of sockets) socket.destroy();
+    await Promise.all(closed);
+  }
+  assert.equal((await call('/')).status, 200, 'admission must recover after clients disconnect');
+});
+
+test('desktop HTTP wrapper closes slow-dripped headers by absolute five-second deadline', async () => {
+  const port = Number(new URL(wrapper.url).port);
+  const socket = connectTcp({ host: '127.0.0.1', port });
+  socket.on('error', () => {}); // ECONNRESET still counts as a bounded peer teardown.
+  try {
+    socket.write('GET / HTTP/1.1\r\nHost: ');
+    const drip = setInterval(() => { if (!socket.destroyed) socket.write('x'); }, 500);
+    try {
+      await Promise.race([
+        new Promise(resolve => socket.once('close', resolve)),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('desktop slow headers exceeded 5.8s')), 5800)),
+      ]);
+    } finally { clearInterval(drip); }
+  } finally { socket.destroy(); }
+  assert.equal((await call('/')).status, 200, 'normal desktop HTTP must work after teardown');
 });
 
 test('source desktop entry has sandboxed renderer and no background service registration', async () => {
@@ -150,8 +192,8 @@ test('owned loopback WebSocket forwarder bridges a synthetic RFB greeting', asyn
         bytes = Buffer.concat([bytes, chunk]);
         const headerEnd = bytes.indexOf('\r\n\r\n');
         if (headerEnd >= 0 && bytes.length >= headerEnd + 4 + 2 + 12) {
-          resolve({ header: bytes.subarray(0, headerEnd).toString(), frame: bytes.subarray(headerEnd + 4) });
-          socket.destroy();
+          socket.setTimeout(0);
+          resolve({ header: bytes.subarray(0, headerEnd).toString(), frame: bytes.subarray(headerEnd + 4), socket });
         }
       });
       socket.once('connect', () => socket.write([
@@ -164,6 +206,11 @@ test('owned loopback WebSocket forwarder bridges a synthetic RFB greeting', asyn
     assert.equal(reply.frame[0], 0x82);
     assert.equal(reply.frame[1], 12);
     assert.equal(reply.frame.subarray(2, 14).toString(), 'RFB 003.008\n');
+    // The absolute HTTP admission timer must *not* kill a validated RFB
+    // WebSocket at five seconds after the accepted upgrade.
+    await new Promise(resolve => setTimeout(resolve, 5200));
+    assert.equal(reply.socket.destroyed, false, 'admitted RFB session was killed by HTTP header deadline');
+    reply.socket.destroy();
   } finally {
     await isolated.close();
     for (const socket of upstreamSockets) socket.destroy();
