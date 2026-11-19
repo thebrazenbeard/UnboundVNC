@@ -17,11 +17,11 @@ function reject(res, status) {
   res.end();
 }
 
-export async function startLocalViewer({ staticRoot, createGateway, allowedPorts = [5900, 5901] }) {
+export async function startLocalViewer({ staticRoot, createGateway, allowedPorts = [5900, 5901], greetingTimeoutMs = 5_000, maxSessions = 8 }) {
   if (typeof createGateway !== 'function') throw new TypeError('A reviewed gateway factory is required');
   const assetRoot = await realpath(staticRoot);
   if (!(await stat(assetRoot)).isDirectory()) throw new Error('Built viewer assets are missing');
-  const gateway = createGateway({ host: LOOPBACK, port: 0, allowedPorts });
+  const gateway = createGateway({ host: LOOPBACK, port: 0, allowedPorts, greetingTimeoutMs, maxSessions });
   const gatewayUrl = new URL(await gateway.listen());
   let viewerPort;
   const bridges = new Set();
