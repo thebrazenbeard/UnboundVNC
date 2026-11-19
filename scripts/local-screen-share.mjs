@@ -4,6 +4,7 @@
  * The Windows host owns local Start, Approve and Stop controls.
  */
 import { connect } from 'node:net';
+import { randomBytes } from 'node:crypto';
 import { createGateway } from '../apps/gateway/src/server.mjs';
 import { startLocalViewer } from '../packaging/viewer-windows/local-server.mjs';
 
@@ -30,6 +31,8 @@ export async function startLocalScreenShare({ staticRoot, launchHost } = {}) {
   }
 
   await assertAttendedPortVacant();
+  // Fresh private key binds this gateway to the owned host launch.
+  const attendedHostKey = randomBytes(32);
   // Deliberately only the Windows attended host's existing RFB port.
   // The desktop HTTP wrapper and RFB gateway both choose ephemeral loopback ports.
   const viewer = await startLocalViewer({
@@ -40,16 +43,18 @@ export async function startLocalScreenShare({ staticRoot, launchHost } = {}) {
     // session gets a bounded 45 seconds; generic gateway remains five seconds.
     greetingTimeoutMs: 45_000,
     maxSessions: 1,
+    attendedHostKey,
   });
 
   let host;
   try {
-    host = await launchHost();
+    host = await launchHost({ sessionKey: attendedHostKey.toString('base64url') });
     if (!host || typeof host.close !== 'function') {
       throw new TypeError('The attended host must return a close handle');
     }
   } catch (error) {
     await viewer.close();
+    attendedHostKey.fill(0);
     throw error;
   }
 
@@ -62,6 +67,7 @@ export async function startLocalScreenShare({ staticRoot, launchHost } = {}) {
       closed = true;
       const results = await Promise.allSettled([viewer.close(), host.close()]);
       const failed = results.find(result => result.status === 'rejected');
+      attendedHostKey.fill(0);
       if (failed) throw failed.reason;
     },
   };

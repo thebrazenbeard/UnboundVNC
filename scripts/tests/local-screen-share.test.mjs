@@ -19,7 +19,9 @@ async function withFixture(fn) {
 test('real loopback viewer and gateway target only Windows attended host port 5901', async () => {
   await withFixture(async (staticRoot) => {
     let launches = 0, closures = 0;
-    const session = await startLocalScreenShare({ staticRoot, launchHost: async () => {
+    let observedKey = null;
+    const session = await startLocalScreenShare({ staticRoot, launchHost: async ({ sessionKey }) => {
+      observedKey = sessionKey;
       launches++;
       return { close: async () => { closures++; } };
     } });
@@ -27,6 +29,8 @@ test('real loopback viewer and gateway target only Windows attended host port 59
       const url = new URL(session.url);
       assert.equal(url.hostname, '127.0.0.1');
       assert.equal(launches, 1);
+      assert.match(observedKey, /^[A-Za-z0-9_-]{43}$/);
+      assert.equal(session.url.includes(observedKey), false);
       const page = await fetch(session.url);
       assert.equal(page.status, 200);
       assert.match(await page.text(), /Private local view/);

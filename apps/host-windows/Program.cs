@@ -3,6 +3,7 @@ using System.Drawing.Imaging;
 using System.Net;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 using Microsoft.Win32;
 
@@ -13,8 +14,15 @@ internal static class Program
     [STAThread]
     private static void Main()
     {
+        // A viewer launch must supply the ephemeral gateway-shared proof key.
+        // Clear its environment exposure before creating the visible host.
+        var encoded = Environment.GetEnvironmentVariable(RfbSessionProof.EnvironmentKey);
+        Environment.SetEnvironmentVariable(RfbSessionProof.EnvironmentKey, null);
+        byte[] key;
+        try { key = RfbSessionProof.ParseKey(encoded); }
+        catch (FormatException) { Environment.ExitCode = 71; return; }
         ApplicationConfiguration.Initialize();
-        Application.Run(new HostWindow());
+        Application.Run(new HostWindow(key));
     }
 }
 
@@ -27,9 +35,11 @@ internal sealed class HostWindow : Form
     private TcpClient? activeClient;
     private Task? acceptWorker;
     private long consentEpoch;
+    private readonly byte[] sessionProofKey;
 
-    public HostWindow()
+    public HostWindow(byte[] sessionProofKey)
     {
+        this.sessionProofKey = sessionProofKey;
         Text = "UnboundVNC | Attended Host Preview";
         Width = 420;
         Height = 180;
@@ -37,7 +47,7 @@ internal sealed class HostWindow : Form
         Controls.Add(toggle);
         toggle.Click += (_, _) => { if (listener is null) Start(); else Stop(); };
         SystemEvents.SessionSwitch += OnSessionSwitch;
-        FormClosing += (_, _) => { Stop(); SystemEvents.SessionSwitch -= OnSessionSwitch; };
+        FormClosing += (_, _) => { Stop(); CryptographicOperations.ZeroMemory(sessionProofKey); SystemEvents.SessionSwitch -= OnSessionSwitch; };
     }
 
     private void Start()
@@ -116,7 +126,8 @@ internal sealed class HostWindow : Form
                     session.CancelAfter(TimeSpan.FromMinutes(5));
                     await RfbSession.Run(client, session.Token,
                         () => !cancellation.IsCancellationRequested &&
-                            Volatile.Read(ref consentEpoch) == authorizedEpoch).ConfigureAwait(false);
+                            Volatile.Read(ref consentEpoch) == authorizedEpoch,
+                        sessionProofKey).ConfigureAwait(false);
                 }
                 catch (Exception ex) when (ex is IOException or SocketException or OperationCanceledException or InvalidDataException or ObjectDisposedException or System.ComponentModel.Win32Exception)
                 {
@@ -210,7 +221,7 @@ internal static class RfbSession
     private const int MaxWidth = 1280;
     private const int MaxHeight = 720;
 
-    public static async Task Run(TcpClient client, CancellationToken token, Func<bool> stillAuthorized)
+    public static async Task Run(TcpClient client, CancellationToken token, Func<bool> stillAuthorized, byte[] sessionProofKey)
     {
         // Approval happens before this method, so no protocol or screen bytes are sent first.
         if (!stillAuthorized()) throw new OperationCanceledException("Local consent revoked");
@@ -218,6 +229,8 @@ internal static class RfbSession
         var desktop = Screen.PrimaryScreen?.Bounds ?? throw new InvalidDataException("No primary screen");
         int width = Math.Min(desktop.Width, MaxWidth), height = Math.Min(desktop.Height, MaxHeight);
         if (width < 1 || height < 1 || !IsDefaultInputDesktop()) throw new InvalidDataException("Desktop not shareable");
+        await RfbSessionProof.ProveAsync(stream, sessionProofKey, token);
+        if (!stillAuthorized()) throw new OperationCanceledException("Consent revoked during host proof");
         await stream.WriteAsync(Version, token);
         var version = new byte[12];
         await stream.ReadExactlyAsync(version, token);

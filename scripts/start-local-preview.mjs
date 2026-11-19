@@ -30,7 +30,7 @@ async function main(args) {
   const executable = resolve(root, 'apps/host-windows/bin/Release/net8.0-windows/UnboundVnc.Host.Windows.exe');
   const session = await startLocalScreenShare({
     staticRoot,
-    launchHost: () => launchAttendedProcess({ executable }),
+    launchHost: ({ sessionKey }) => launchAttendedProcess({ executable, sessionKey }),
   });
   let closing = false;
   async function close() {

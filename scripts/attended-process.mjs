@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process';
 import { stat } from 'node:fs/promises';
 import { dirname, isAbsolute } from 'node:path';
 
-export async function launchAttendedProcess({ executable, args = [] } = {}) {
+export async function launchAttendedProcess({ executable, args = [], sessionKey } = {}) {
   if (process.platform !== 'win32') {
     throw new Error('Windows interactive attended host only');
   }
@@ -16,7 +16,11 @@ export async function launchAttendedProcess({ executable, args = [] } = {}) {
     throw new Error('Windows attended executable not found');
   }
 
+  if (typeof sessionKey !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(sessionKey)) {
+    throw new Error('An exact per-launch host proof key is required');
+  }
   const child = spawn(executable, args, {
+    env: { ...process.env, UNBOUNDVNC_ATTENDED_SESSION_KEY: sessionKey },
     cwd: dirname(executable),
     windowsHide: false,
     shell: false,
