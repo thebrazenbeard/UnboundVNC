@@ -8,6 +8,7 @@ on:
       - 'tests/host-windows-runner-desktop/**'
       - 'tests/host-windows-ci-rfb/**'
       - 'tests/host-windows-pixelformat/**'
+      - 'tests/host-windows-session-proof/**'
       - '.github/workflows/windows-host-build.yml'
   workflow_dispatch:
 permissions:
@@ -30,6 +31,8 @@ jobs:
         run: dotnet run --project tests/host-windows-input/HostInputPolicyChecks.csproj --configuration Release
       - name: Exact local host and stock noVNC pixel-format checks
         run: dotnet run --project tests/host-windows-pixelformat/RfbPixelPolicyChecks.csproj --configuration Release
+      - name: Per-launch attended host challenge-response positive and negative policy
+        run: dotnet run --project tests/host-windows-session-proof/RfbSessionProofChecks.csproj --configuration Release
       - name: Host assembly native input disabled and fake release-failure checks
         run: dotnet run --project tests/host-windows-effect-safety/HostEffectSafetyChecks.csproj --configuration Release -- apps/host-windows/bin/Release/net8.0-windows/UnboundVnc.Host.Windows.dll
       - name: Hosted Windows desktop probe (diagnostic only; no consent simulation)

@@ -1,6 +1,6 @@
 import { createServer } from 'node:http';
 import { connect } from 'node:net';
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { performance } from 'node:perf_hooks';
 
@@ -81,7 +81,7 @@ function validOrigin(req, localPort) {
 }
 
 /** Local-only WebSocket/RFB bridge. Call gateway.listen() before using it. */
-export function createGateway({ port = 6081, host = '127.0.0.1', allowedPorts = [5900], heartbeatMs = HEARTBEAT_MS, greetingTimeoutMs = 5_000, maxSessions = MAX_SOCKETS } = {}) {
+export function createGateway({ port = 6081, host = '127.0.0.1', allowedPorts = [5900], heartbeatMs = HEARTBEAT_MS, greetingTimeoutMs = 5_000, maxSessions = MAX_SOCKETS, attendedHostKey = null } = {}) {
   if (host !== '127.0.0.1' || !Number.isInteger(port) || port < 0 || port > 65535) {
     throw new Error('Gateway must bind to IPv4 loopback on a valid port');
   }
@@ -104,6 +104,14 @@ export function createGateway({ port = 6081, host = '127.0.0.1', allowedPorts = 
   if (greetingTimeoutMs > 5_000 && (maxSessions !== 1 || allowedPorts.length !== 1)) {
     throw new Error('Extended attended greeting requires single-session, single-target local admission');
   }
+  // Only the explicit attended single-host composite enables this proof.
+  // The 32-byte key is created per launch and must not be caller-prompt data.
+  if (attendedHostKey !== null &&
+      (!Buffer.isBuffer(attendedHostKey) || attendedHostKey.length !== 32 ||
+       maxSessions !== 1 || allowedPorts.length !== 1)) {
+    throw new Error('Attended host key requires a 32-byte Buffer, single-session and single-target');
+  }
+  const attendedKey = attendedHostKey === null ? null : Buffer.from(attendedHostKey);
   const permittedPorts = new Set(allowedPorts);
   const tickets = new Map();
   const connections = new Set();
@@ -198,6 +206,14 @@ export function createGateway({ port = 6081, host = '127.0.0.1', allowedPorts = 
     clearHeaderDeadline(ws);
 
     const rfb = connect({ host: '127.0.0.1', port: ticket.port });
+    // On an attended connection, proof follows host approval (not before).
+    // Reading bytes before consent would trigger the host's fail-closed
+    // pending-consent monitor; wait for a fixed marker, then challenge.
+    const bindingPrefix = Buffer.from('UVNC1', 'ascii');
+    const bindingChallenge = attendedKey === null ? null : randomBytes(32);
+    const bindingReply = Buffer.alloc(32);
+    let bindingPhase = attendedKey === null ? 'ready' : 'prefix';
+    let bindingRead = 0;
     let upgraded = false;
     let closed = false;
     let rejecting = false;
@@ -281,6 +297,39 @@ export function createGateway({ port = 6081, host = '127.0.0.1', allowedPorts = 
     }
     rfb.on('data', data => {
       if (closed) return;
+      if (bindingPhase !== 'ready') {
+        let offset = 0;
+        while (offset < data.length && bindingPhase !== 'ready' && !closed) {
+          if (bindingPhase === 'prefix') {
+            const n = Math.min(bindingPrefix.length - bindingRead, data.length - offset);
+            if (!data.subarray(offset, offset + n).equals(bindingPrefix.subarray(bindingRead, bindingRead + n))) {
+              return forceCleanup();
+            }
+            bindingRead += n;
+            offset += n;
+            if (bindingRead === bindingPrefix.length) {
+              bindingRead = 0;
+              bindingPhase = 'response';
+              if (!rfb.write(bindingChallenge)) rfb.pause();
+            }
+          } else {
+            const n = Math.min(bindingReply.length - bindingRead, data.length - offset);
+            data.copy(bindingReply, bindingRead, offset, offset + n);
+            bindingRead += n;
+            offset += n;
+            if (bindingRead === bindingReply.length) {
+              const expected = createHmac('sha256', attendedKey)
+                .update('UNBOUNDVNC-ATTENDED-RFB-PROOF-v1:', 'ascii')
+                .update(bindingChallenge).digest();
+              if (!timingSafeEqual(expected, bindingReply)) return forceCleanup();
+              bindingRead = 0;
+              bindingPhase = 'ready';
+            }
+          }
+        }
+        data = data.subarray(offset);
+        if (!data.length) return;
+      }
       if (!upgraded) {
         const length = Math.min(12 - greetingLength, data.length);
         data.copy(greeting, greetingLength, 0, length);
@@ -406,6 +455,8 @@ export function createGateway({ port = 6081, host = '127.0.0.1', allowedPorts = 
       for (const socket of pendingHttpSockets) socket.destroy();
       for (const c of connections) c();
       await new Promise((resolve, reject) => server.close(err => err ? reject(err) : resolve()));
+      // Erase our private per-launch proof after all sockets are shut down.
+      attendedKey?.fill(0);
     },
   };
 }

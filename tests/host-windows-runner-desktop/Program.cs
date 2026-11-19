@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Security.Cryptography;
 using System.Net.NetworkInformation;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -74,11 +75,15 @@ internal static class Program
         Process? host = null;
         try
         {
+            byte[] privateKey = RandomNumberGenerator.GetBytes(32);
+            string encodedKey = Convert.ToBase64String(privateKey)
+                .TrimEnd('=').Replace('+', '-').Replace('/', '_');
             host = Process.Start(new ProcessStartInfo
             {
                 FileName = Path.GetFullPath(args[0]),
                 WorkingDirectory = Path.GetDirectoryName(Path.GetFullPath(args[0]))!,
-                UseShellExecute = false
+                UseShellExecute = false,
+                Environment = { ["UNBOUNDVNC_ATTENDED_SESSION_KEY"] = encodedKey }
             });
             if (host is null) throw new InvalidOperationException("Host process did not start");
             DateTime deadline = DateTime.UtcNow.AddSeconds(8);

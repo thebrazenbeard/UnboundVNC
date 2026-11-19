@@ -4,6 +4,7 @@ using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 
 namespace UnboundVnc.HostedRfbSyntheticConsent;
@@ -12,6 +13,23 @@ namespace UnboundVnc.HostedRfbSyntheticConsent;
 // Windows runner. BM_CLICK is deliberate CI automation, NEVER human consent.
 internal static class Program
 {
+    private static void VerifyPostConsentHostProof(NetworkStream stream, byte[] key)
+    {
+        byte[] marker = ReadExact(stream, 5);
+        Require(Encoding.ASCII.GetString(marker) == "UVNC1", "WRONG_HOST_PROOF_MARKER");
+        byte[] challenge = RandomNumberGenerator.GetBytes(32);
+        stream.Write(challenge);
+        byte[] answer = ReadExact(stream, 32);
+        byte[] expected = HMACSHA256.HashData(key,
+            Encoding.ASCII.GetBytes("UNBOUNDVNC-ATTENDED-RFB-PROOF-v1:")
+                .Concat(challenge).ToArray());
+        Require(CryptographicOperations.FixedTimeEquals(answer, expected),
+            "WRONG_HOST_PROOF_RESPONSE");
+        CryptographicOperations.ZeroMemory(challenge);
+        CryptographicOperations.ZeroMemory(expected);
+        CryptographicOperations.ZeroMemory(answer);
+    }
+
     private const string HostTitle = "UnboundVNC | Attended Host Preview";
     private const string ApprovalTitle = "UnboundVNC | Approve local screen sharing";
     private static readonly byte[] Version = Encoding.ASCII.GetBytes("RFB 003.008\n");
@@ -111,6 +129,10 @@ internal static class Program
             byte[] firstOracle = oracle!;
             Console.WriteLine("TEST_OWNED_32x24_MULTICOLOR_WINDOW_ORACLE=PASS");
 
+            // Disposable CI-only key; the real host still requires a per-launch binding.
+            byte[] hostProofKey = RandomNumberGenerator.GetBytes(32);
+            string hostProofEncoded = Convert.ToBase64String(hostProofKey)
+                .TrimEnd('=').Replace('+', '-').Replace('/', '_');
             Process? host = null;
             try
             {
@@ -118,7 +140,8 @@ internal static class Program
                 {
                     FileName = Path.GetFullPath(args[0]),
                     WorkingDirectory = Path.GetDirectoryName(Path.GetFullPath(args[0]))!,
-                    UseShellExecute = false
+                    UseShellExecute = false,
+                    Environment = { ["UNBOUNDVNC_ATTENDED_SESSION_KEY"] = hostProofEncoded }
                 });
                 Require(host is not null, "HOST_PROCESS_NOT_CREATED");
                 IntPtr window = WaitForMainWindow(host!, TimeSpan.FromSeconds(8));
@@ -143,6 +166,7 @@ internal static class Program
                 ClickOwnedButton(host!, dialog, "Approve");
                 Console.WriteLine("CONSENT_CLICK=SYNTHETIC_CI_APPROVE");
 
+                VerifyPostConsentHostProof(stream, hostProofKey);
                 NegotiateRfbViewOnly(stream, frameWidth, frameHeight);
                 int regionX = x - OracleWidth / 2, regionY = y - OracleHeight / 2;
                 ValidateRawPatternRequest(stream, regionX, regionY, firstOracle);
