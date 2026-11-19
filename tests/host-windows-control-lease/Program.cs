@@ -114,6 +114,18 @@ Check(callbackFinished&&revokeFinished,"atomic effect and revoke ordering was wr
 Check(!RfbInputDispatch.TryKey(atomicLease,Key(0x61),obs14,2,
     key=>throw new InvalidOperationException("effect after revoked")),
     "post-revocation delivery escaped");
+var beforeCapture=DateTimeOffset.UtcNow.AddSeconds(-1);
+var captured=TrustedControlObservation.Capture(200, sessionCurrent:false);
+var afterCapture=DateTimeOffset.UtcNow.AddSeconds(1);
+Check(captured.Now>=beforeCapture&&captured.Now<=afterCapture,
+    "host observation time cannot be provided by RFB client");
+Check(!captured.SessionCurrent,"host false session was silently promoted");
+Check(captured.SessionEpoch==200,"epoch binding changed");
+var observedLease=new AttendedControlLease();
+Check(observedLease.Grant(LocalInputConsent.AllowControl,target,200,time.AddMinutes(2)),
+    "synthetic test lease missing");
+Check(!observedLease.TryConsumeKey(type,captured,1),
+    "real OS observation of unapproved session accepted fake input");
 Console.WriteLine("CONTROL_LEASE_GATE_PASS="+assertions);
 
 static byte[] Key(uint keysym)

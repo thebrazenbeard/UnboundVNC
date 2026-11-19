@@ -185,7 +185,8 @@ Console.WriteLine("PASS: 10 hosted Windows native-effect negative groups; real n
 static void AssertAllowedNativeImports(IEnumerable<MethodInfo> methods)
 {
     var allowedUser32 = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-        { "OpenInputDesktop", "GetUserObjectInformationW", "CloseDesktop" };
+        { "OpenInputDesktop", "GetUserObjectInformationW", "CloseDesktop",
+          "GetForegroundWindow", "GetAncestor", "GetWindowThreadProcessId", "GetWindowRect" };
     var prohibited = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         { "SendInput", "SetCursorPos", "mouse_event", "keybd_event", "SendMessageW", "PostMessageW" };
     foreach (var method in methods)
