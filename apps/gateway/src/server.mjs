@@ -81,7 +81,7 @@ function validOrigin(req, localPort) {
 }
 
 /** Local-only WebSocket/RFB bridge. Call gateway.listen() before using it. */
-export function createGateway({ port = 6081, host = '127.0.0.1', allowedPorts = [5900], heartbeatMs = HEARTBEAT_MS } = {}) {
+export function createGateway({ port = 6081, host = '127.0.0.1', allowedPorts = [5900], heartbeatMs = HEARTBEAT_MS, greetingTimeoutMs = 5_000, maxSessions = MAX_SOCKETS } = {}) {
   if (host !== '127.0.0.1' || !Number.isInteger(port) || port < 0 || port > 65535) {
     throw new Error('Gateway must bind to IPv4 loopback on a valid port');
   }
@@ -91,6 +91,18 @@ export function createGateway({ port = 6081, host = '127.0.0.1', allowedPorts = 
   }
   if (!Number.isInteger(heartbeatMs) || heartbeatMs < 10 || heartbeatMs > 300_000) {
     throw new Error('Gateway requires a bounded WebSocket heartbeat interval');
+  }
+  if (!Number.isInteger(greetingTimeoutMs) || greetingTimeoutMs < 5_000 || greetingTimeoutMs > 60_000) {
+    throw new Error('Gateway greeting timeout must be between 5000 and 60000 milliseconds');
+  }
+  if (!Number.isInteger(maxSessions) || maxSessions < 1 || maxSessions > MAX_SOCKETS) {
+    throw new Error('Gateway maxSessions must be a bounded positive session count');
+  }
+  // An attended host delays its RFB banner until a local user approves.
+  // The longer window must be explicitly single-session and single-target:
+  // never allow multiple stalled peers to consume its extended admission time.
+  if (greetingTimeoutMs > 5_000 && (maxSessions !== 1 || allowedPorts.length !== 1)) {
+    throw new Error('Extended attended greeting requires single-session, single-target local admission');
   }
   const permittedPorts = new Set(allowedPorts);
   const tickets = new Map();
@@ -172,7 +184,7 @@ export function createGateway({ port = 6081, host = '127.0.0.1', allowedPorts = 
     // Consume regardless of failure, preventing replay, including during TCP connect.
     tickets.delete(match[1]);
     if (!ticket || ticket.expires < Date.now()) return rejectUpgrade(ws);
-    if (connections.size >= MAX_SOCKETS) return rejectUpgrade(ws, 429);
+    if (connections.size >= maxSessions) return rejectUpgrade(ws, 429);
     const key = req.headers['sec-websocket-key'];
     const decoded = typeof key === 'string' ? Buffer.from(key, 'base64') : Buffer.alloc(0);
     if (req.headers.upgrade?.toLowerCase() !== 'websocket' || !req.headers.connection?.toLowerCase().split(',').map(s => s.trim()).includes('upgrade') || req.headers['sec-websocket-version'] !== '13' || decoded.length !== 16 || Buffer.from(decoded).toString('base64') !== key) {
@@ -208,7 +220,7 @@ export function createGateway({ port = 6081, host = '127.0.0.1', allowedPorts = 
     // net.Socket#setTimeout is an *idle* timeout, which a peer can reset by
     // slowly dripping a partial RFB banner. Reserve scarce admission slots
     // for at most five seconds of total upstream handshake time instead.
-    const greetingDeadline = setTimeout(forceCleanup, 5_000);
+    const greetingDeadline = setTimeout(forceCleanup, greetingTimeoutMs);
     greetingDeadline.unref();
     function scheduleCloseDeadline() {
       // ws.end() sends our Close+FIN but does not require the peer to send

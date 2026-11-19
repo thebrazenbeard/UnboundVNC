@@ -40,3 +40,14 @@ This fixes a usable LOCAL composition and a real attended-host GUI launch from S
 4. Keep this candidate Draft until real consumer-machine screen sharing and negative security tests are independently verified.
 
 No merge, public listener, credential enrollment, or installed consumer runtime was performed by this draft.
+## Live local screen-sharing qualification, 2026-11-19
+
+STATUS: REAL WINDOWS LOCAL SCREEN-SHARING TEST PASS, with automated test GUI approval, NOT qualified human consent or remote access.
+
+An independently coded private RFB client connected through the actual gateway to a source-matched Windows attended host running in interactive Lappy Session 2. Two 2x2 test-owned desktop marker regions were compared byte-for-byte, with a deliberate color change between captures. A separate fresh headless Microsoft Edge Chromium test used the actual compiled viewer: normal Quick Connect to 127.0.0.1:5901, decoded noVNC canvas pixel matched test marker RGB before and after the deliberate change, and the remote-disconnect banner appeared after on-host Stop and revoke. No private desktop screenshots were saved or publicly shared. The host process was ended and temporary scheduled tasks removed.
+
+The test revealed two concrete compatibility defects:
+- The gateway's absolute five-second RFB greeting timeout was incompatible with an attended host that sends its first RFB banner only after approval. The local composite now explicitly requests a longer bounded 45-second, single-target and single-session greeting window. The generic gateway retains five seconds. Unsafe multiple-session/port extension requests fail closed.
+- noVNC requests 32bpp little-endian truecolor with red shift zero, green shift eight, blue shift sixteen. Windows host previously rejected this alternate valid layout. The new policy accepts exactly these two advertised/native and noVNC truecolor layouts; converts the bounded captured raw BGR buffer for the noVNC layout, and rejects unsupported formats. The source-linked standalone policy tests cover both valid and multiple invalid variants. Windows Release rebuilds.
+
+Evidence: REAL_WINDOWS_GUI / LOCAL_TCP_RFB / ACTUAL_EDGE_CHROMIUM_CANVAS and TEST. Source of private bounded witness is under D:\VERA\_agent-work\engineer-b-vnc-acceptance-20261119. The on-host approval was a deliberately automated source-matched test action under owner authorization; it does not establish human-controlled attendance. Separate human approval and authenticated encrypted cross-device remote access remain HOLD. Keyboard/mouse input not enabled or qualified. Stop and revoke was verified to close the local browser session and port.

@@ -206,7 +206,7 @@ internal sealed class HostWindow : Form
 internal static class RfbSession
 {
     private static readonly byte[] Version = Encoding.ASCII.GetBytes("RFB 003.008\n");
-    private static readonly byte[] PixelFormat = { 32, 24, 0, 1, 0, 255, 0, 255, 0, 255, 16, 8, 0, 0, 0, 0 };
+    private static readonly byte[] PixelFormat = RfbPixelFormatPolicy.Advertised;
     private const int MaxWidth = 1280;
     private const int MaxHeight = 720;
 
@@ -233,6 +233,8 @@ internal static class RfbSession
         await WriteU32(stream, (uint)name.Length, token);
         await stream.WriteAsync(name, token);
         var scratch = new byte[20];
+        // Format negotiation is per-connection and cannot authorize any input.
+        var redFirst = false;
         while (true)
         {
             token.ThrowIfCancellationRequested();
@@ -243,7 +245,7 @@ internal static class RfbSession
                 case 0: // SetPixelFormat: only the advertised 32bpp little-endian truecolor format.
                     await stream.ReadExactlyAsync(scratch.AsMemory(0, 3), token);
                     await stream.ReadExactlyAsync(scratch.AsMemory(0, 16), token);
-                    if (!scratch.AsSpan(0, 16).SequenceEqual(PixelFormat)) throw new InvalidDataException("Unsupported pixel format");
+                    if (!RfbPixelFormatPolicy.TrySelect(scratch.AsSpan(0, 16), out redFirst)) throw new InvalidDataException("Unsupported pixel format");
                     break;
                 case 2: // SetEncodings: raw encoding is always available.
                     await stream.ReadExactlyAsync(scratch.AsMemory(0, 3), token);
@@ -259,7 +261,7 @@ internal static class RfbSession
                     int h = BinaryPrimitives.ReadUInt16BigEndian(scratch.AsSpan(7, 2));
                     if (w < 1 || h < 1 || x + w > width || y + h > height || !IsDefaultInputDesktop())
                         throw new InvalidDataException("Unsafe framebuffer request or desktop switch");
-                    await SendRawRectangle(stream, desktop.Left + x, desktop.Top + y, x, y, w, h, token, stillAuthorized);
+                    await SendRawRectangle(stream, desktop.Left + x, desktop.Top + y, x, y, w, h, token, stillAuthorized, redFirst);
                     await Task.Delay(100, token).ConfigureAwait(false); // Bound client-driven capture to at most 10 frames/s.
                     break;
                 case 4: // KeyEvent deliberately discarded; no unattended input.
@@ -284,7 +286,7 @@ internal static class RfbSession
         }
     }
 
-    private static async Task SendRawRectangle(NetworkStream stream, int sourceX, int sourceY, int x, int y, int w, int h, CancellationToken token, Func<bool> stillAuthorized)
+    private static async Task SendRawRectangle(NetworkStream stream, int sourceX, int sourceY, int x, int y, int w, int h, CancellationToken token, Func<bool> stillAuthorized, bool redFirst)
     {
         using var frame = new Bitmap(w, h, PixelFormat32bppArgb);
         using (var graphics = Graphics.FromImage(frame)) graphics.CopyFromScreen(sourceX, sourceY, 0, 0, new Size(w, h));
@@ -296,6 +298,8 @@ internal static class RfbSession
                 Marshal.Copy(IntPtr.Add(locked.Scan0, row * locked.Stride), bytes, row * w * 4, w * 4);
         }
         finally { frame.UnlockBits(locked); }
+        // GDI captured B,G,R,pad; translate only the exact noVNC pixel request.
+        RfbPixelFormatPolicy.ConvertInPlace(bytes, redFirst);
         // Never transmit a captured frame after revocation or an input-desktop change.
         token.ThrowIfCancellationRequested();
         if (!stillAuthorized() || !IsDefaultInputDesktop())

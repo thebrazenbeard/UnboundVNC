@@ -36,6 +36,10 @@ export async function startLocalScreenShare({ staticRoot, launchHost } = {}) {
     staticRoot,
     createGateway,
     allowedPorts: [5901],
+    // Human approval precedes the host's first RFB banner. One pending
+    // session gets a bounded 45 seconds; generic gateway remains five seconds.
+    greetingTimeoutMs: 45_000,
+    maxSessions: 1,
   });
 
   let host;
