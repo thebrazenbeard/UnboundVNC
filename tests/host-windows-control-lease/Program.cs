@@ -158,6 +158,77 @@ Check(applied==1&&revokeApplyDone,"queued UI callback/revoke ordering wrong");
 Check(!testQueuedApplyGate.TryApplyWhileCurrent(queuedObs,()=>applied++),
     "revoked queued effect applied");
 Check(applied==1,"UI effect occurred after Stop ACK");
+var monotonicLease = new AttendedControlLease();
+var earlyObservation = DateTimeOffset.UtcNow;
+var shortExpiry = earlyObservation.AddMilliseconds(360);
+Check(monotonicLease.Grant(LocalInputConsent.AllowControl, target, 555,
+    shortExpiry), "short monotonic lease grant denied");
+var staleObserved = obs with { SessionEpoch = 555, Now = earlyObservation };
+System.Threading.Thread.Sleep(480);
+int staleEffects = 0;
+Check(!RfbInputDispatch.TryKey(monotonicLease, Key(0x61), staleObserved, 1,
+    key=>{ staleEffects++; return true; }),
+    "cached pre-expiry observation must NOT grant post-expiry input");
+Check(staleEffects == 0, "stale-time callback executed after expiry");
+Check(!monotonicLease.IsCurrent(staleObserved),
+    "stale-time UI queue check still current after real expiry");
+var preGrantFence=new RfbTestInputFence();
+Check(!preGrantFence.Ready, "view-only input fence unexpectedly ready");
+Check(!preGrantFence.TryIssueChallenge(false,out _),"pregrant request issued a control token");
+Check(!preGrantFence.Ready,"pregrant request unlocked control");
+var bufferedKey=Key(0x7a);
+var syntheticDelivered="";
+var safeInputLease=new AttendedControlLease();
+Check(safeInputLease.Grant(LocalInputConsent.AllowControl,target,600,
+    DateTimeOffset.UtcNow.AddMinutes(2)),"fence test-only lease denied");
+var fenceObs=obs with {SessionEpoch=600};
+Check(preGrantFence.TryIssueChallenge(true,out var issuedChallenge),
+    "postgrant challenge missing");
+Check(issuedChallenge.StartsWith(RfbTestInputFence.ChallengePrefix,StringComparison.Ordinal),
+    "wrong challenge envelope");
+Check(!preGrantFence.Ready,"challenge issued but not confirmed");
+Check(!(preGrantFence.Ready && RfbInputDispatch.TryKey(safeInputLease,
+    bufferedKey,fenceObs,1,key=>{syntheticDelivered+=key.Character;return true;})),
+    "old buffered z promoted before challenge response");
+Check(syntheticDelivered=="","old z became a test effect");
+Check(!preGrantFence.TryIssueChallenge(true,out _),"challenge was reissued");
+var nonce=issuedChallenge[RfbTestInputFence.ChallengePrefix.Length..];
+var response=RfbTestInputFence.ResponsePrefix+nonce;
+Check(preGrantFence.TryConfirm(true,response),"fresh correct postgrant response denied");
+Check(preGrantFence.Ready,"confirmed control fence not ready");
+Check(!preGrantFence.TryConfirm(true,response),"replay of control response accepted");
+Check(preGrantFence.Ready,"duplicate echo should not expand control permission");
+Check(preGrantFence.Ready && RfbInputDispatch.TryKey(safeInputLease,Key(0x61),
+    fenceObs,2,key=>{syntheticDelivered+=key.Character;return true;}),
+    "new postgrant a refused");
+Check(syntheticDelivered=="a","old pregrant input leaked or postgrant lost");
+preGrantFence.Invalidate();
+Check(!preGrantFence.Ready,"Stop failed to revoke transport fence");
+Check(!preGrantFence.TryConfirm(true,response),"revoked control response accepted");
+var foreignFence=new RfbTestInputFence();
+Check(foreignFence.TryIssueChallenge(true,out _),"foreign challenge setup failed");
+Check(!foreignFence.TryConfirm(true,response),"foreign replay authorized control");
+Check(!foreignFence.Ready,"foreign replay unlocked control");
+var wrongFence=new RfbTestInputFence();
+Check(wrongFence.TryIssueChallenge(true,out var wrongChallenge),"wrong-nonce setup failed");
+Check(!wrongFence.TryConfirm(true,RfbTestInputFence.ResponsePrefix+
+    new string('A',43)),"forged response accepted");
+Check(!wrongFence.Ready,"wrong response unlocked control");
+Check(!wrongFence.TryConfirm(true,RfbTestInputFence.ResponsePrefix+
+    wrongChallenge[RfbTestInputFence.ChallengePrefix.Length..]),
+    "failed connection silently rearmed");
+var noncanonicalFence=new RfbTestInputFence();
+Check(noncanonicalFence.TryIssueChallenge(true,out var canonChallenge),
+    "noncanonical witness setup refused");
+string canonNonce=canonChallenge[RfbTestInputFence.ChallengePrefix.Length..];
+const string alphabet="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+int lastIndex=alphabet.IndexOf(canonNonce[^1]);
+Check(lastIndex>=0,"generated base64url nonce was invalid");
+string altNonce=canonNonce[..^1]+alphabet[lastIndex ^ 1];
+Check(altNonce!=canonNonce,"negative nonce must differ");
+Check(!noncanonicalFence.TryConfirm(true,RfbTestInputFence.ResponsePrefix+altNonce),
+    "noncanonical final base64url bits were accepted");
+Check(!noncanonicalFence.Ready,"noncanonical response unlocked test input");
 Console.WriteLine("CONTROL_LEASE_GATE_PASS="+assertions);
 
 static byte[] Key(uint keysym)

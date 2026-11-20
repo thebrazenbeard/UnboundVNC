@@ -10,6 +10,7 @@
   <ItemGroup>
     <Compile Include="../../apps/host-windows/AttendedControlLease.cs" Link="AttendedControlLease.cs" />
     <Compile Include="../../apps/host-windows/RfbInputDispatch.cs" Link="RfbInputDispatch.cs" />
+    <Compile Include="../../apps/host-windows/RfbTestInputFence.cs" Link="RfbTestInputFence.cs" />
     <Compile Include="../../apps/host-windows/TrustedControlObservation.cs" Link="TrustedControlObservation.cs" />
     <Compile Include="../../apps/host-windows/ExperimentalInputPolicy.cs" Link="ExperimentalInputPolicy.cs" />
   </ItemGroup>
