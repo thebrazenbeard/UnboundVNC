@@ -286,7 +286,12 @@ internal static class Program
                 stream.Write(new byte[] { 5, 0, (byte)(px>>8), (byte)px,
                     (byte)(py>>8), (byte)py });
                 bool clickedNative = WaitUntil(
-                    () => HasOwnedChildText(host!, testInput, "NATIVE_RFB_CLICK_COUNT=1"),
+                    () =>
+                    {
+                        GetWindowThreadProcessId(nativeButton, out uint testButtonOwner);
+                        return testButtonOwner == (uint)host!.Id &&
+                            Caption(nativeButton) == "NATIVE_RFB_CLICK_COUNT=1";
+                    },
                     TimeSpan.FromSeconds(6));
                 if (!clickedNative)
                 {
@@ -297,7 +302,7 @@ internal static class Program
                     Console.WriteLine($"NATIVE_POINTER_HIT_EQUALS_TARGET={hitWindow == nativeButton}");
                     Console.WriteLine($"NATIVE_POINTER_FOREGROUND_EQUALS_TEST_FORM={foreground == testInput}");
                     Console.WriteLine($"NATIVE_POINTER_CURSOR_EQUALS_TARGET={Math.Abs(cursorPosition.X - screenPoint.X) <= 2 && Math.Abs(cursorPosition.Y - screenPoint.Y) <= 2}");
-                    Console.WriteLine($"NATIVE_POINTER_BUTTON_CAPTION_CHANGED={Caption(nativeButton) != "NATIVE RFB pointer click target"}");
+                    Console.WriteLine($"NATIVE_POINTER_BUTTON_CAPTION={Caption(nativeButton)}");
                     Console.WriteLine($"NATIVE_POINTER_BUTTON_SPAN={nativeBounds.Right-nativeBounds.Left}x{nativeBounds.Bottom-nativeBounds.Top}");
                     Console.WriteLine($"NATIVE_POINTER_HOST_EXITED={host!.HasExited}");
                 }
