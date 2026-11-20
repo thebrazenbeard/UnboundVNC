@@ -200,6 +200,11 @@ internal static class Program
 
                 ValidateRawPatternRequest(stream, regionX, regionY, second);
                 Console.WriteLine("SAME_RFB_SESSION_SECOND_RAW_32x24_CHANGED_PIXELS=PASS");
+                // The earlier TOPMOST framebuffer test marker overlaps part
+                // of the later native input target on hosted runner geometry.
+                // Hide only this disposable CI-owned window for pointer tests.
+                marker.TopMost = false;
+                marker.Hide();
                 // Two separate source-matched synthetic CI clicks are TEST automation,
                 // never evidence of a human granting OS input rights.
                 // Unarmed key event 'z' must have NO GUI effect.
@@ -248,6 +253,64 @@ internal static class Program
                     "RFBCONTROL_TEST_OWNED_TEXTBOX_DID_NOT_EQUAL_A");
                 Console.WriteLine("RFB_TEST_OWNED_FORM_KEY_A_ONLY=PASS");
 
+                // THIRD, separate automation-only TEST-form approval activates
+                // the *actual* Windows SendInput adapter. Synthetic AppendText
+                // is disabled in this mode, so only a real OS key event can
+                // update the host-owned editable TextBox.
+                ClickOwnedButton(host!, testInput,
+                    "Enable NATIVE input (OWNED TEST FORM ONLY)");
+                Require(ReadOnlyOwnedTestEdit(host!, testInput) == "",
+                    "NATIVE_TEST_FIELD_NOT_CLEARED_ON_APPROVAL");
+                stream.Write(new byte[] { 4, 1, 0, 0, 0, 0, 0, 97 }); // 'a' down
+                stream.Write(new byte[] { 4, 0, 0, 0, 0, 0, 97 }); // RFB release
+                bool typedNative = WaitUntil(
+                    () => ReadOnlyOwnedTestEdit(host!, testInput) == "a",
+                    TimeSpan.FromSeconds(6));
+                Require(typedNative, "WIN32_NATIVE_RFB_KEY_NOT_OBSERVED");
+                Console.WriteLine("RFB_WIN32_SENDINPUT_KEY_A=PASS_TEST_FORM_ONLY");
+
+                // A real RFB pointer event must arrive at a separate
+                // host-owned button; BM_CLICK is used only for approval, not
+                // for this effect. Exact target and dimensions are observed
+                // from Windows HWND state, not the remote client's assertions.
+                IntPtr nativeButton = FindOwnedChildButton(host!, testInput,
+                    "NATIVE RFB pointer click target");
+                Require(GetWindowRect(nativeButton, out var nativeBounds),
+                    "NATIVE_POINTER_BUTTON_BOUNDS_MISSING");
+                int px = (nativeBounds.Left + nativeBounds.Right) / 2 - bounds.Left;
+                int py = (nativeBounds.Top + nativeBounds.Bottom) / 2 - bounds.Top;
+                Require(px is >= 1 and < 1280 && py is >= 1 and < 720,
+                    "NATIVE_POINTER_OUTSIDE_TEST_FRAME");
+                stream.Write(new byte[] { 5, 1, (byte)(px>>8), (byte)px,
+                    (byte)(py>>8), (byte)py });
+                stream.Write(new byte[] { 5, 0, (byte)(px>>8), (byte)px,
+                    (byte)(py>>8), (byte)py });
+                bool clickedNative = WaitUntil(
+                    () =>
+                    {
+                        GetWindowThreadProcessId(nativeButton, out uint testButtonOwner);
+                        return testButtonOwner == (uint)host!.Id &&
+                            IsWindow(nativeButton) && !IsWindowEnabled(nativeButton);
+                    },
+                    TimeSpan.FromSeconds(6));
+                if (!clickedNative)
+                {
+                    var screenPoint = new Point(bounds.Left + px, bounds.Top + py);
+                    var hitWindow = WindowFromPoint(screenPoint);
+                    var foreground = GetForegroundWindow();
+                    _ = GetCursorPos(out var cursorPosition);
+                    Console.WriteLine($"NATIVE_POINTER_HIT_EQUALS_TARGET={hitWindow == nativeButton}");
+                    Console.WriteLine($"NATIVE_POINTER_FOREGROUND_EQUALS_TEST_FORM={foreground == testInput}");
+                    Console.WriteLine($"NATIVE_POINTER_CURSOR_EQUALS_TARGET={Math.Abs(cursorPosition.X - screenPoint.X) <= 2 && Math.Abs(cursorPosition.Y - screenPoint.Y) <= 2}");
+                    Console.WriteLine($"NATIVE_POINTER_BUTTON_HWND_VALID={IsWindow(nativeButton)}");
+                    Console.WriteLine($"NATIVE_POINTER_BUTTON_ENABLED={IsWindowEnabled(nativeButton)}");
+                    Console.WriteLine($"NATIVE_POINTER_BUTTON_SPAN={nativeBounds.Right-nativeBounds.Left}x{nativeBounds.Bottom-nativeBounds.Top}");
+                    Console.WriteLine($"NATIVE_POINTER_HOST_EXITED={host!.HasExited}");
+                }
+                Require(clickedNative, "WIN32_NATIVE_RFB_POINTER_NOT_OBSERVED");
+                Console.WriteLine("RFB_WIN32_SENDINPUT_POINTER_CLICK=PASS_TEST_FORM_ONLY");
+
+
                 // The alternative is a same-PID but DIFFERENT HWND. Its RFB
                 // input is not within the approved target and cannot modify a.
                 ClickOwnedButton(host!, testInput, "Focus alternate synthetic window");
@@ -264,6 +327,8 @@ internal static class Program
                 // Exercise Stop while a larger framebuffer update is already
                 // visible on the wire. Cover the *whole* requested frame with
                 // our test-owned opaque window before allowing screen capture.
+                marker.Show();
+                marker.TopMost = true;
                 marker.Bounds = new Rectangle(bounds.Left, bounds.Top, frameWidth, frameHeight);
                 marker.BringToFront();
                 marker.Refresh();
@@ -625,6 +690,49 @@ internal static class Program
         return window;
     }
 
+
+    private static IntPtr FindOwnedChildButton(Process host, IntPtr parent, string exactCaption)
+    {
+        Require(!host.HasExited, "HOST_EXITED_BEFORE_NATIVE_CHILD_LOOKUP");
+        GetWindowThreadProcessId(parent, out uint owner);
+        Require(owner == (uint)host.Id, "FOREIGN_NATIVE_PARENT_DENIED");
+        IntPtr selected = IntPtr.Zero;
+        _ = EnumChildWindows(parent, (candidate, _) =>
+        {
+            if (Caption(candidate) == exactCaption)
+            {
+                GetWindowThreadProcessId(candidate, out uint candidateOwner);
+                if (candidateOwner == owner)
+                {
+                    selected = candidate;
+                    return false;
+                }
+            }
+            return true;
+        }, IntPtr.Zero);
+        Require(selected != IntPtr.Zero, "NATIVE_TARGET_NOT_SOURCE_OWNED");
+        return selected;
+    }
+
+    private static bool HasOwnedChildText(Process host, IntPtr parent, string exactCaption)
+    {
+        if (host.HasExited) return false;
+        GetWindowThreadProcessId(parent, out uint owner);
+        if (owner != (uint)host.Id) return false;
+        bool found = false;
+        _ = EnumChildWindows(parent, (candidate, _) =>
+        {
+            GetWindowThreadProcessId(candidate, out uint pid);
+            if (pid == owner && Caption(candidate) == exactCaption)
+            {
+                found = true;
+                return false;
+            }
+            return true;
+        }, IntPtr.Zero);
+        return found;
+    }
+
     private static void ClickOwnedButton(Process host, IntPtr parent, string buttonCaption)
     {
         Require(!host.HasExited, "HOST_EXITED_BEFORE_BUTTON");
@@ -700,6 +808,34 @@ internal static class Program
         internal string Code { get; } = code;
     }
 
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct WinRect
+    {
+        public int Left, Top, Right, Bottom;
+    }
+
+    [DllImport("user32.dll", EntryPoint = "GetWindowRect")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetWindowRect(IntPtr hwnd, out WinRect rect);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct WinPoint
+    {
+        public int X, Y;
+    }
+
+    [DllImport("user32.dll", EntryPoint = "IsWindow")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsWindow(IntPtr hwnd);
+    [DllImport("user32.dll", EntryPoint = "IsWindowEnabled")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsWindowEnabled(IntPtr hwnd);
+    [DllImport("user32.dll", EntryPoint = "WindowFromPoint")]
+    private static extern IntPtr WindowFromPoint(Point point);
+    [DllImport("user32.dll", EntryPoint = "GetCursorPos")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetCursorPos(out WinPoint point);
     private delegate bool EnumWindowCallback(IntPtr hwnd, IntPtr state);
     [DllImport("kernel32.dll")] private static extern uint WTSGetActiveConsoleSessionId();
     [DllImport("kernel32.dll")] private static extern uint GetCurrentThreadId();

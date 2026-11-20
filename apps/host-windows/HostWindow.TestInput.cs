@@ -27,6 +27,9 @@ internal sealed partial class HostWindow
     private long controlSessionEpoch;
     private long activeTestEpoch = long.MinValue;
     private readonly object testQueueSync = new();
+    private bool nativeTestEnabled;
+    private Button? nativeClickTarget;
+    private int nativeClickCount;
 
     private void InitializeTestInput()
     {
@@ -80,6 +83,17 @@ internal sealed partial class HostWindow
             MaxLength = 64,
             AccessibleName = "Synthetic received RFB key events"
         };
+        // The default synthetic pathway remains read-only. Real Win32
+        // input is possible only after ANOTHER visible host-local click.
+        typed.KeyPress += (_, eventArgs) =>
+        {
+            if (!nativeTestEnabled) { eventArgs.Handled = true; return; }
+            long epoch = Interlocked.Read(ref activeTestEpoch);
+            var observed = TrustedControlObservation.Capture(
+                epoch, listener is not null && Volatile.Read(ref activeClient) is not null);
+            if (!testLease.IsCurrent(observed))
+                eventArgs.Handled = true;
+        };
         var info = new Label
         {
             Dock = DockStyle.Fill,
@@ -124,6 +138,47 @@ internal sealed partial class HostWindow
             alternative.Show(test);
             alternative.Activate();
         };
+        var nativeEnable = new Button
+        {
+            Text = "Enable NATIVE input (OWNED TEST FORM ONLY)",
+            Dock = DockStyle.Bottom, Height = 32
+        };
+        var nativeClick = new Button
+        {
+            Text = "NATIVE RFB pointer click target",
+            Dock = DockStyle.Bottom, Height = 32,
+            AccessibleName = "NATIVE RFB pointer click target"
+        };
+        nativeClickTarget = nativeClick;
+        nativeEnable.Click += (_, _) =>
+        {
+            long epoch = Interlocked.Read(ref activeTestEpoch);
+            if (!testLease.IsCurrent(TrustedControlObservation.Capture(
+                    epoch, listener is not null && Volatile.Read(ref activeClient) is not null)))
+                return;
+            nativeTestEnabled = true;
+            typed.ReadOnly = false;
+            typed.Clear();
+            nativeClickCount = 0;
+            nativeEnable.Enabled = false;
+            nativeEnable.Text = "NATIVE TEST MODE ACTIVE; STOP to revoke";
+            state.Text = "NATIVE TEST INPUT ONLY (owned form). Stop immediately revokes. No Firefox permission.";
+            test.Activate();
+            typed.Focus();
+        };
+        nativeClick.Click += (_, _) =>
+        {
+            long epoch = Interlocked.Read(ref activeTestEpoch);
+            if (!nativeTestEnabled ||
+                !testLease.IsCurrent(TrustedControlObservation.Capture(
+                    epoch, listener is not null && Volatile.Read(ref activeClient) is not null)))
+                return;
+            nativeClickCount++;
+            nativeClick.Enabled = false; // UI-backed one-shot actual native click receipt
+            pointer.Text = $"NATIVE_RFB_CLICK_COUNT={nativeClickCount}";
+        };
+        test.Controls.Add(nativeClick);
+        test.Controls.Add(nativeEnable);
         test.Controls.Add(wrongTarget);
         test.Controls.Add(info);
         test.Controls.Add(pointer);
@@ -133,6 +188,8 @@ internal sealed partial class HostWindow
         testPointerLabel = pointer;
         test.FormClosed += (_, _) =>
         {
+            nativeTestEnabled = false;
+            nativeClickTarget = null;
             testLease.Revoke();
             ClearTestQueue();
             testInputWindow = null;
@@ -217,7 +274,16 @@ internal sealed partial class HostWindow
                         epoch, listener is not null && Volatile.Read(ref activeClient) is not null),
                     () =>
                     {
-                        if (key.Down && testOutput.TextLength < 64)
+                        if (nativeTestEnabled)
+                        {
+                            if (key.Down && testOutput.TextLength < 64 &&
+                                !NativeOwnedTestFormInput.TryTypeTestChar(key,
+                                    testInputWindow.Handle, testInputWindow.Bounds,
+                                    testOutput.Focused, epoch,
+                                    listener is not null && Volatile.Read(ref activeClient) is not null))
+                                throw new InvalidOperationException("Native TEST key effect denied or failed");
+                        }
+                        else if (key.Down && testOutput.TextLength < 64)
                             testOutput.AppendText(key.Character.ToString());
                     }))
             {
@@ -231,8 +297,23 @@ internal sealed partial class HostWindow
             if (!testLease.TryApplyWhileCurrent(
                     TrustedControlObservation.Capture(
                         epoch, listener is not null && Volatile.Read(ref activeClient) is not null),
-                    () => testPointerLabel.Text =
-                        $"Synthetic RFB pointer: {pointer.ScreenX},{pointer.ScreenY} buttons={pointer.Buttons}"))
+                    () =>
+                    {
+                        if (nativeTestEnabled && pointer.Buttons == 1)
+                        {
+                            if (nativeClickTarget is not { IsDisposed: false } ||
+                                !NativeOwnedTestFormInput.TryClickTestButton(
+                                    pointer, testInputWindow.Handle,
+                                    testInputWindow.Bounds,
+                                    nativeClickTarget.RectangleToScreen(
+                                        nativeClickTarget.ClientRectangle), epoch,
+                                    listener is not null && Volatile.Read(ref activeClient) is not null))
+                                throw new InvalidOperationException("Native TEST pointer effect denied or failed");
+                        }
+                        else if (!nativeTestEnabled)
+                            testPointerLabel.Text =
+                                $"Synthetic RFB pointer: {pointer.ScreenX},{pointer.ScreenY} buttons={pointer.Buttons}";
+                    }))
             {
                 ClearTestQueue();
                 break;
@@ -251,6 +332,7 @@ internal sealed partial class HostWindow
 
     private void RevokeTestInput()
     {
+        nativeTestEnabled = false;
         testLease.Revoke();
         Interlocked.Exchange(ref activeTestEpoch, long.MinValue);
         ClearTestQueue();
