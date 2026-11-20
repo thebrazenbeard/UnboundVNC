@@ -290,7 +290,7 @@ internal static class Program
                     {
                         GetWindowThreadProcessId(nativeButton, out uint testButtonOwner);
                         return testButtonOwner == (uint)host!.Id &&
-                            Caption(nativeButton) == "NATIVE_RFB_CLICK_COUNT=1";
+                            IsWindow(nativeButton) && !IsWindowEnabled(nativeButton);
                     },
                     TimeSpan.FromSeconds(6));
                 if (!clickedNative)
@@ -302,7 +302,8 @@ internal static class Program
                     Console.WriteLine($"NATIVE_POINTER_HIT_EQUALS_TARGET={hitWindow == nativeButton}");
                     Console.WriteLine($"NATIVE_POINTER_FOREGROUND_EQUALS_TEST_FORM={foreground == testInput}");
                     Console.WriteLine($"NATIVE_POINTER_CURSOR_EQUALS_TARGET={Math.Abs(cursorPosition.X - screenPoint.X) <= 2 && Math.Abs(cursorPosition.Y - screenPoint.Y) <= 2}");
-                    Console.WriteLine($"NATIVE_POINTER_BUTTON_CAPTION={Caption(nativeButton)}");
+                    Console.WriteLine($"NATIVE_POINTER_BUTTON_HWND_VALID={IsWindow(nativeButton)}");
+                    Console.WriteLine($"NATIVE_POINTER_BUTTON_ENABLED={IsWindowEnabled(nativeButton)}");
                     Console.WriteLine($"NATIVE_POINTER_BUTTON_SPAN={nativeBounds.Right-nativeBounds.Left}x{nativeBounds.Bottom-nativeBounds.Top}");
                     Console.WriteLine($"NATIVE_POINTER_HOST_EXITED={host!.HasExited}");
                 }
@@ -824,6 +825,12 @@ internal static class Program
         public int X, Y;
     }
 
+    [DllImport("user32.dll", EntryPoint = "IsWindow")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsWindow(IntPtr hwnd);
+    [DllImport("user32.dll", EntryPoint = "IsWindowEnabled")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsWindowEnabled(IntPtr hwnd);
     [DllImport("user32.dll", EntryPoint = "WindowFromPoint")]
     private static extern IntPtr WindowFromPoint(Point point);
     [DllImport("user32.dll", EntryPoint = "GetCursorPos")]
