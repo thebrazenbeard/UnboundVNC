@@ -281,6 +281,13 @@ internal static class Program
                 int py = (nativeBounds.Top + nativeBounds.Bottom) / 2 - bounds.Top;
                 Require(px is >= 1 and < 1280 && py is >= 1 and < 720,
                     "NATIVE_POINTER_OUTSIDE_TEST_FRAME");
+                // Independent BEFORE-input Windows hit-test prevents treating
+                // a misplaced or occluded target as an injection failure.
+                var intendedScreenPoint = new Point(bounds.Left + px, bounds.Top + py);
+                Console.WriteLine($"NATIVE_POINTER_PREFLIGHT_HWND_VALID={IsWindow(nativeButton)}");
+                Console.WriteLine($"NATIVE_POINTER_PREFLIGHT_ENABLED={IsWindowEnabled(nativeButton)}");
+                Console.WriteLine($"NATIVE_POINTER_PREFLIGHT_HIT={WindowFromPoint(intendedScreenPoint) == nativeButton}");
+                Console.WriteLine($"NATIVE_POINTER_PREFLIGHT_FOREGROUND={GetForegroundWindow() == testInput}");
                 stream.Write(new byte[] { 5, 1, (byte)(px>>8), (byte)px,
                     (byte)(py>>8), (byte)py });
                 stream.Write(new byte[] { 5, 0, (byte)(px>>8), (byte)px,
