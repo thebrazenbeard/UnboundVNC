@@ -305,6 +305,11 @@ internal static class Program
                 Console.WriteLine($"NATIVE_POINTER_180MS_TEST_FORM_ALIVE={IsWindow(testInput)}");
                 Console.WriteLine($"NATIVE_POINTER_180MS_TARGET_ALIVE={IsWindow(nativeButton)}");
                 Console.WriteLine($"NATIVE_POINTER_180MS_FOREGROUND_IS_TEST={GetForegroundWindow() == testInput}");
+                // Only exact source-defined test status labels can be read.
+                foreach (int stage in new[] {0,1,2,3,4,10,11,12,13})
+                    if (HasOwnedChildText(host!, window, "TEST_NATIVE_POINTER_REVOKED_STAGE="+stage))
+                        Console.WriteLine($"NATIVE_POINTER_HOST_REVOKED_STAGE={stage}");
+                Console.WriteLine($"NATIVE_POINTER_HOST_STOPPED={HasOwnedChildText(host!, window, "Stopped. All connections revoked.")}");
                 // A WinForms button may recreate its HWND when disabled.
                 // A stale pre-click HWND is NOT a valid native-effect receipt.
                 // Instead independently inspect the TEST FORM OWNED, visible
