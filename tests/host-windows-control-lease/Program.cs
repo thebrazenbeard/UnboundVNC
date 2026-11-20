@@ -35,11 +35,13 @@ Check(!lease.TryConsumePointer(click,obs with {TargetBounds=new Rectangle(10,10,
     "window moved or resized after consent");
 Check(!lease.TryConsumeKey(new NormalizedKey(true,LocalKeyKind.Enter,'\0'),obs,1),
     "Enter can submit and requires separate explicit send permission");
+Check(lease.IsCurrent(obs),"current authorization inspection failed");
 Check(lease.TryConsumePointer(click,obs,1),"first valid pointer refused");
 Check(!lease.TryConsumePointer(click,obs,1),"same event sequence replayed");
 Check(lease.TryConsumeKey(type,obs,2),"valid key refused");
 Check(!lease.TryConsumeKey(type,obs,1),"out-of-order event accepted");
 lease.Revoke();
+Check(!lease.IsCurrent(obs),"revoked lease still reported current");
 Check(!lease.TryConsumePointer(click,obs,3),"input accepted after revoke");
 Check(!lease.TryConsumeKey(type,obs,3),"key accepted after revoke");
 Check(!lease.Grant(LocalInputConsent.AllowControl,target,12,time.AddMinutes(2)),
@@ -126,6 +128,36 @@ Check(observedLease.Grant(LocalInputConsent.AllowControl,target,200,time.AddMinu
     "synthetic test lease missing");
 Check(!observedLease.TryConsumeKey(type,captured,1),
     "real OS observation of unapproved session accepted fake input");
+var testQueuedApplyGate=new AttendedControlLease();
+Check(testQueuedApplyGate.Grant(LocalInputConsent.AllowControl,target,22,time.AddMinutes(2)),
+    "queued apply setup failed");
+var queuedObs=obs with {SessionEpoch=22};
+int applied=0;
+Check(!testQueuedApplyGate.TryApplyWhileCurrent(
+    queuedObs with {ForegroundRoot=other.WindowHandle},()=>applied++),
+    "wrong-foreground queued effect applied");
+Check(applied==0,"wrong-foreground callback actually ran");
+var applyStarted=new System.Threading.ManualResetEventSlim();
+var releaseApply=new System.Threading.ManualResetEventSlim();
+bool revokeApplyDone=false;
+var pendingApply=Task.Run(()=>testQueuedApplyGate.TryApplyWhileCurrent(
+    queuedObs,()=>{
+        applyStarted.Set();
+        if(!releaseApply.Wait(TimeSpan.FromSeconds(5)))
+            throw new InvalidOperationException("timed out queued UI effect");
+        Interlocked.Increment(ref applied);
+    }));
+Check(applyStarted.Wait(TimeSpan.FromSeconds(5)),"queued apply never started");
+var revokeQueued=Task.Run(()=>{testQueuedApplyGate.Revoke();revokeApplyDone=true;});
+System.Threading.Thread.Sleep(100);
+Check(!revokeApplyDone,"Stop acknowledged while queued UI callback was in progress");
+releaseApply.Set();
+Check(pendingApply.GetAwaiter().GetResult(),"queued effect was incorrectly dropped");
+revokeQueued.GetAwaiter().GetResult();
+Check(applied==1&&revokeApplyDone,"queued UI callback/revoke ordering wrong");
+Check(!testQueuedApplyGate.TryApplyWhileCurrent(queuedObs,()=>applied++),
+    "revoked queued effect applied");
+Check(applied==1,"UI effect occurred after Stop ACK");
 Console.WriteLine("CONTROL_LEASE_GATE_PASS="+assertions);
 
 static byte[] Key(uint keysym)

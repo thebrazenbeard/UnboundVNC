@@ -200,6 +200,38 @@ internal static class Program
 
                 ValidateRawPatternRequest(stream, regionX, regionY, second);
                 Console.WriteLine("SAME_RFB_SESSION_SECOND_RAW_32x24_CHANGED_PIXELS=PASS");
+                // Two separate source-matched synthetic CI clicks are TEST automation,
+                // never evidence of a human granting OS input rights.
+                // Unarmed key event 'z' must have NO GUI effect.
+                stream.Write(new byte[] { 4, 1, 0, 0, 0, 0, 0, 122 });
+                ClickOwnedButton(host!, window, "Allow TEST input (owned form only)");
+                IntPtr testInput = WaitForOwnedWindow(host!,
+                    "UnboundVNC | Synthetic input target", TimeSpan.FromSeconds(5));
+                Require(testInput != IntPtr.Zero, "HOST_OWNED_TEST_INPUT_FORM_MISSING");
+                Console.WriteLine("SECOND_SYNTHETIC_CI_CONTROL_CLICK=NOT_HUMAN");
+
+                // Enter must remain prohibited. Only lower-case a may append to
+                // the exact local test form. This is NOT global/native injection.
+                stream.Write(new byte[] { 4, 1, 0, 0, 0, 0, 0xff, 0x0d });
+                stream.Write(new byte[] { 4, 1, 0, 0, 0, 0, 0, 97 });
+                stream.Write(new byte[] { 4, 0, 0, 0, 0, 0, 0, 97 });
+                Require(WaitUntil(() => ReadOnlyOwnedTestEdit(host!, testInput) == "a",
+                        TimeSpan.FromSeconds(6)),
+                    "RFBCONTROL_TEST_OWNED_TEXTBOX_DID_NOT_EQUAL_A");
+                Console.WriteLine("RFB_TEST_OWNED_FORM_KEY_A_ONLY=PASS");
+
+                // The alternative is a same-PID but DIFFERENT HWND. Its RFB
+                // input is not within the approved target and cannot modify a.
+                ClickOwnedButton(host!, testInput, "Focus alternate synthetic window");
+                IntPtr otherInput = WaitForOwnedWindow(host!,
+                    "UnboundVNC | Alternate synthetic target", TimeSpan.FromSeconds(5));
+                Require(otherInput != IntPtr.Zero, "TEST_OTHER_OWNED_WINDOW_MISSING");
+                stream.Write(new byte[] { 4, 1, 0, 0, 0, 0, 0, 98 });
+                Thread.Sleep(350);
+                Require(ReadOnlyOwnedTestEdit(host!, testInput) == "a",
+                    "RFB_WRONG_WINDOW_KEY_CHANGED_OWNED_TEXTBOX");
+                Console.WriteLine("RFB_SAME_PID_WRONG_HWND_INPUT_REFUSED=PASS");
+
 
                 // Exercise Stop while a larger framebuffer update is already
                 // visible on the wire. Cover the *whole* requested frame with
@@ -569,6 +601,32 @@ internal static class Program
             0x0002, 2000, out _) != IntPtr.Zero, "BUTTON_CLICK_TIMED_OUT");
     }
 
+    private static string? ReadOnlyOwnedTestEdit(Process host, IntPtr parent)
+    {
+        // This source-owned test HWND and PID must match our disposable host.
+        // This helper never reads any real desktop/browser input or text.
+        GetWindowThreadProcessId(parent, out uint owner);
+        Require(owner == (uint)host.Id && Caption(parent) == "UnboundVNC | Synthetic input target",
+            "TEST_CONTROL_READ_TARGET_MISMATCH");
+        IntPtr edit = IntPtr.Zero;
+        _ = EnumChildWindows(parent, (candidate, _) =>
+        {
+            GetWindowThreadProcessId(candidate, out uint pid);
+            var className = new StringBuilder(120);
+            _ = GetClassName(candidate, className, className.Capacity);
+            if (pid == owner && className.ToString().Contains("EDIT", StringComparison.OrdinalIgnoreCase))
+            {
+                edit = candidate;
+                return false;
+            }
+            return true;
+        }, IntPtr.Zero);
+        if (edit == IntPtr.Zero) return null;
+        var result = new StringBuilder(100);
+        return SendMessageTimeoutText(edit, 0x000D, (IntPtr)result.Capacity,
+            result, 0x0002, 1000, out _) == IntPtr.Zero ? null : result.ToString();
+    }
+
     private static string Caption(IntPtr hwnd)
     {
         var title = new StringBuilder(256);
@@ -605,6 +663,11 @@ internal static class Program
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetUserObjectInformationW(IntPtr handle, int index,
         StringBuilder buffer, uint length, out uint required);
+    [DllImport("user32.dll", EntryPoint = "GetClassNameW", CharSet = CharSet.Unicode)]
+    private static extern int GetClassName(IntPtr hwnd, StringBuilder text, int maxCount);
+    [DllImport("user32.dll", EntryPoint = "SendMessageTimeoutW", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr SendMessageTimeoutText(IntPtr hwnd, uint message, IntPtr wparam,
+        StringBuilder lparam, uint flags, uint timeoutMs, out IntPtr result);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern int GetWindowText(IntPtr hwnd, StringBuilder text, int maxCount);
     [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);

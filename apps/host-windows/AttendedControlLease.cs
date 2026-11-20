@@ -99,6 +99,34 @@ internal sealed class AttendedControlLease
         }
     }
 
+    // Used by the host-owned GUI consumer BEFORE applying queued test-only
+    // events; revocation is checked again on the actual UI thread.
+    internal bool IsCurrent(ControlObservation observed)
+    {
+        lock (sync)
+        {
+            return allowedTarget is ControlTarget target &&
+                observed.DefaultDesktop && observed.SessionCurrent &&
+                observed.SessionEpoch == allowedEpoch &&
+                observed.ForegroundRoot == target.WindowHandle &&
+                observed.ForegroundOwnerPid == target.ProcessId &&
+                observed.TargetBounds == target.Bounds &&
+                observed.Now < expiresAt;
+        }
+    }
+    // Re-check AND apply a queued test-only UI effect under the same lock used
+    // by Stop/Revoke. No UI update may happen after revocation returns, even
+    // when the foreground HWND changes between queue and timer callbacks.
+    internal bool TryApplyWhileCurrent(ControlObservation observed, Action apply)
+    {
+        ArgumentNullException.ThrowIfNull(apply);
+        lock (sync)
+        {
+            if (!IsCurrent(observed)) return false;
+            apply(); // MUST be bounded, nonblocking and local test-form only.
+            return true;
+        }
+    }
     private bool TryAdmit(ControlObservation observed, long sequence)
     {
         if (allowedTarget is not ControlTarget target ||
