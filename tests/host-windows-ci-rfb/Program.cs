@@ -322,6 +322,9 @@ internal static class Program
                     "UNEXPECTED_InvalidOperationException", "UNEXPECTED_ArgumentException" })
                     if (HasOwnedChildText(host!, window, "TEST_RFB_EXIT="+exitKind))
                         Console.WriteLine($"NATIVE_POINTER_RFB_EXIT={exitKind}");
+                for (int type = 0; type < 256; type++)
+                    if (HasOwnedChildText(host!, window, "TEST_RFB_EXIT=CI_UNKNOWN_TYPE_"+type))
+                        Console.WriteLine($"NATIVE_POINTER_UNKNOWN_RFB_TYPE={type}");
                 // A WinForms button may recreate its HWND when disabled.
                 // A stale pre-click HWND is NOT a valid native-effect receipt.
                 // Instead independently inspect the TEST FORM OWNED, visible

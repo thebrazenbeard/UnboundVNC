@@ -146,7 +146,10 @@ internal sealed partial class HostWindow : Form
                 }
                 catch (Exception ex) when (ex is IOException or SocketException or OperationCanceledException or InvalidDataException or ObjectDisposedException or System.ComponentModel.Win32Exception)
                 {
-                    testSessionExit = ex is InvalidDataException ? ex.Message switch
+                    testSessionExit = ex is InvalidDataException &&
+                        ex.Message.StartsWith("CI_UNKNOWN_TYPE_", StringComparison.Ordinal)
+                            ? ex.Message
+                            : ex is InvalidDataException ? ex.Message switch
                     {
                         "Unknown RFB client message" => "INVALID_TYPE",
                         "Unsafe framebuffer request or desktop switch" => "UNSAFE_FRAME",
@@ -304,7 +307,8 @@ internal static class RfbSession
             token.ThrowIfCancellationRequested();
             if (!stillAuthorized() || !IsDefaultInputDesktop())
                 throw new OperationCanceledException("Consent revoked or desktop switched");
-            switch (await ReadByte(stream, token))
+            int clientType = await ReadByte(stream, token);
+            switch (clientType)
             {
                 case 0: // SetPixelFormat: only the advertised 32bpp little-endian truecolor format.
                     await stream.ReadExactlyAsync(scratch.AsMemory(0, 3), token);
@@ -379,7 +383,11 @@ internal static class RfbSession
                             command);
                     }
                     break;
-                default: throw new InvalidDataException("Unknown RFB client message");
+                default:
+                    if (Environment.GetEnvironmentVariable("UNBOUNDVNC_CI_SYNTHETIC_CONSENT") ==
+                        "explicit-runner-only")
+                        throw new InvalidDataException("CI_UNKNOWN_TYPE_" + clientType);
+                    throw new InvalidDataException("Unknown RFB client message");
             }
         }
     }
