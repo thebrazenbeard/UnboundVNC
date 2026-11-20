@@ -228,6 +228,10 @@ internal static class Program
                     Console.WriteLine($"SYNTHETIC_FOREGROUND_OWNED_BY_TEST_HOST={foregroundPid == (uint)host!.Id}");
                     Console.WriteLine($"SYNTHETIC_TEST_EDIT_FOUND={syntheticText is not null}");
                     Console.WriteLine($"SYNTHETIC_TEST_EDIT_LENGTH={syntheticText?.Length ?? -1}");
+                    // Codepoints of this exact disposable host-owned test edit ONLY.
+                    Console.WriteLine("SYNTHETIC_TEST_OWNED_CODEPOINTS=" +
+                        (syntheticText is null ? "UNREADABLE" :
+                         string.Join(",", syntheticText.Take(4).Select(ch => (int)ch))));
                 }
                 Require(matchedSyntheticInput,
                     "RFBCONTROL_TEST_OWNED_TEXTBOX_DID_NOT_EQUAL_A");
