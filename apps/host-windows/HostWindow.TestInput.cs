@@ -174,6 +174,7 @@ internal sealed partial class HostWindow
                     epoch, listener is not null && Volatile.Read(ref activeClient) is not null)))
                 return;
             nativeClickCount++;
+            nativeClick.Text = $"NATIVE_RFB_CLICK_COUNT={nativeClickCount}";
             pointer.Text = $"NATIVE_RFB_CLICK_COUNT={nativeClickCount}";
         };
         test.Controls.Add(nativeClick);
