@@ -200,6 +200,11 @@ internal static class Program
 
                 ValidateRawPatternRequest(stream, regionX, regionY, second);
                 Console.WriteLine("SAME_RFB_SESSION_SECOND_RAW_32x24_CHANGED_PIXELS=PASS");
+                // The earlier TOPMOST framebuffer test marker overlaps part
+                // of the later native input target on hosted runner geometry.
+                // Hide only this disposable CI-owned window for pointer tests.
+                marker.TopMost = false;
+                marker.Hide();
                 // Two separate source-matched synthetic CI clicks are TEST automation,
                 // never evidence of a human granting OS input rights.
                 // Unarmed key event 'z' must have NO GUI effect.
@@ -302,6 +307,8 @@ internal static class Program
                 // Exercise Stop while a larger framebuffer update is already
                 // visible on the wire. Cover the *whole* requested frame with
                 // our test-owned opaque window before allowing screen capture.
+                marker.Show();
+                marker.TopMost = true;
                 marker.Bounds = new Rectangle(bounds.Left, bounds.Top, frameWidth, frameHeight);
                 marker.BringToFront();
                 marker.Refresh();
