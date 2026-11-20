@@ -26,7 +26,7 @@ internal static class Program
     }
 }
 
-internal sealed class HostWindow : Form
+internal sealed partial class HostWindow : Form
 {
     private readonly Button toggle = new() { Text = "Start local preview", Dock = DockStyle.Top, Height = 48 };
     private readonly Label state = new() { Text = "Stopped. No remote access.", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter };
@@ -45,6 +45,7 @@ internal sealed class HostWindow : Form
         Height = 180;
         Controls.Add(state);
         Controls.Add(toggle);
+        InitializeTestInput();
         toggle.Click += (_, _) => { if (listener is null) Start(); else Stop(); };
         SystemEvents.SessionSwitch += OnSessionSwitch;
         FormClosing += (_, _) => { Stop(); CryptographicOperations.ZeroMemory(sessionProofKey); SystemEvents.SessionSwitch -= OnSessionSwitch; };
@@ -73,6 +74,8 @@ internal sealed class HostWindow : Form
 
     private void Stop()
     {
+        // The test-only control lease is revoked before any host close ACK.
+        RevokeTestInput();
         // Revocation becomes visible to the capture worker before socket shutdown.
         Interlocked.Increment(ref consentEpoch);
         lifetime?.Cancel();
@@ -94,8 +97,9 @@ internal sealed class HostWindow : Form
         if (e.Reason is not (SessionSwitchReason.SessionLock or SessionSwitchReason.ConsoleDisconnect or SessionSwitchReason.RemoteDisconnect))
             return;
 
-        // Revoke before UI dispatch: a blocked UI thread must not keep a viewer authorized.
+        // Revoke BOTH view and test-input grants before UI dispatch.
         Interlocked.Increment(ref consentEpoch);
+        RevokeTestInput();
         Volatile.Read(ref activeClient)?.Close();
         try
         {
@@ -122,18 +126,32 @@ internal sealed class HostWindow : Form
                             client.Client, ApproveConnection, cancellation).ConfigureAwait(false) ||
                         Volatile.Read(ref consentEpoch) != offeredEpoch) continue;
                     var authorizedEpoch = offeredEpoch;
+                    var controlEpoch = Interlocked.Increment(ref controlSessionEpoch);
                     using var session = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
                     session.CancelAfter(TimeSpan.FromMinutes(5));
-                    await RfbSession.Run(client, session.Token,
-                        () => !cancellation.IsCancellationRequested &&
-                            Volatile.Read(ref consentEpoch) == authorizedEpoch,
-                        sessionProofKey).ConfigureAwait(false);
+                    Func<bool> stillAuthorized = () =>
+                        !cancellation.IsCancellationRequested &&
+                        Volatile.Read(ref consentEpoch) == authorizedEpoch;
+                    try
+                    {
+                        if (IsHandleCreated && !IsDisposed)
+                            BeginInvoke((Action)(() => SetTestInputAvailable(controlEpoch)));
+                    }
+                    catch (InvalidOperationException) { }
+                    await RfbSession.Run(client, session.Token, stillAuthorized,
+                        sessionProofKey, testLease,
+                        () => TrustedControlObservation.Capture(controlEpoch, stillAuthorized()),
+                        EnqueueTestKey, EnqueueTestPointer).ConfigureAwait(false);
                 }
                 catch (Exception ex) when (ex is IOException or SocketException or OperationCanceledException or InvalidDataException or ObjectDisposedException or System.ComponentModel.Win32Exception)
                 {
                     // Deliberately no frame, credential, clipboard or desktop data is logged.
                 }
-                finally { if (ReferenceEquals(activeClient, client)) activeClient = null; }
+                finally
+                {
+                    RevokeTestInput();
+                    if (ReferenceEquals(activeClient, client)) activeClient = null;
+                }
             }
         }
         catch (Exception ex) when (ex is OperationCanceledException or ObjectDisposedException or SocketException) { }
@@ -221,7 +239,12 @@ internal static class RfbSession
     private const int MaxWidth = 1280;
     private const int MaxHeight = 720;
 
-    public static async Task Run(TcpClient client, CancellationToken token, Func<bool> stillAuthorized, byte[] sessionProofKey)
+    public static async Task Run(TcpClient client, CancellationToken token,
+        Func<bool> stillAuthorized, byte[] sessionProofKey,
+        AttendedControlLease? testLease = null,
+        Func<ControlObservation>? inputObservation = null,
+        Func<NormalizedKey, bool>? testKeySink = null,
+        Func<NormalizedPointer, bool>? testPointerSink = null)
     {
         // Approval happens before this method, so no protocol or screen bytes are sent first.
         if (!stillAuthorized()) throw new OperationCanceledException("Local consent revoked");
@@ -248,6 +271,7 @@ internal static class RfbSession
         var scratch = new byte[20];
         // Format negotiation is per-connection and cannot authorize any input.
         var redFirst = false;
+        long inputSequence = 0;
         while (true)
         {
             token.ThrowIfCancellationRequested();
@@ -277,11 +301,18 @@ internal static class RfbSession
                     await SendRawRectangle(stream, desktop.Left + x, desktop.Top + y, x, y, w, h, token, stillAuthorized, redFirst);
                     await Task.Delay(100, token).ConfigureAwait(false); // Bound client-driven capture to at most 10 frames/s.
                     break;
-                case 4: // KeyEvent deliberately discarded; no unattended input.
+                case 4: // TEST-OWNED form only; all ordinary sessions remain view-only.
                     await stream.ReadExactlyAsync(scratch.AsMemory(0, 7), token);
+                    if (testLease is not null && inputObservation is not null && testKeySink is not null)
+                        _ = RfbInputDispatch.TryKey(testLease, scratch.AsSpan(0, 7),
+                            inputObservation(), ++inputSequence, testKeySink);
                     break;
-                case 5: // PointerEvent deliberately discarded.
+                case 5: // No OS cursor or native mouse injection.
                     await stream.ReadExactlyAsync(scratch.AsMemory(0, 5), token);
+                    if (testLease is not null && inputObservation is not null && testPointerSink is not null)
+                        _ = RfbInputDispatch.TryPointer(testLease, scratch.AsSpan(0, 5),
+                            width, height, desktop.Left, desktop.Top,
+                            inputObservation(), ++inputSequence, testPointerSink);
                     break;
                 case 6: // ClientCutText deliberately discarded with bounded size.
                     await stream.ReadExactlyAsync(scratch.AsMemory(0, 7), token);
