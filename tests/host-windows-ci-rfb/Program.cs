@@ -288,17 +288,23 @@ internal static class Program
                 Console.WriteLine($"NATIVE_POINTER_PREFLIGHT_ENABLED={IsWindowEnabled(nativeButton)}");
                 Console.WriteLine($"NATIVE_POINTER_PREFLIGHT_HIT={WindowFromPoint(intendedScreenPoint) == nativeButton}");
                 Console.WriteLine($"NATIVE_POINTER_PREFLIGHT_FOREGROUND={GetForegroundWindow() == testInput}");
+                Require(IsWindow(nativeButton) && IsWindowEnabled(nativeButton) &&
+                    WindowFromPoint(intendedScreenPoint) == nativeButton &&
+                    GetForegroundWindow() == testInput, "NATIVE_POINTER_PREFLIGHT_NOT_OWNED");
+                Require(!HasOwnedChildText(host!, testInput, "NATIVE_RFB_CLICK_COUNT=1"),
+                    "NATIVE_POINTER_EFFECT_PREEXISTED_BEFORE_RFB");
                 stream.Write(new byte[] { 5, 1, (byte)(px>>8), (byte)px,
                     (byte)(py>>8), (byte)py });
                 stream.Write(new byte[] { 5, 0, (byte)(px>>8), (byte)px,
                     (byte)(py>>8), (byte)py });
+                // A WinForms button may recreate its HWND when disabled.
+                // A stale pre-click HWND is NOT a valid native-effect receipt.
+                // Instead independently inspect the TEST FORM OWNED, visible
+                // click-handler label. The only path to this label in the host
+                // is the real WinForms button Click handler, not BM_CLICK or
+                // a model-asserted result.
                 bool clickedNative = WaitUntil(
-                    () =>
-                    {
-                        GetWindowThreadProcessId(nativeButton, out uint testButtonOwner);
-                        return testButtonOwner == (uint)host!.Id &&
-                            IsWindow(nativeButton) && !IsWindowEnabled(nativeButton);
-                    },
+                    () => HasOwnedChildText(host!, testInput, "NATIVE_RFB_CLICK_COUNT=1"),
                     TimeSpan.FromSeconds(6));
                 if (!clickedNative)
                 {
