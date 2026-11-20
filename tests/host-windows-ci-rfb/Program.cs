@@ -297,6 +297,14 @@ internal static class Program
                     (byte)(py>>8), (byte)py });
                 stream.Write(new byte[] { 5, 0, (byte)(px>>8), (byte)px,
                     (byte)(py>>8), (byte)py });
+                // Diagnostic only, on disposable runner: determine if the
+                // native cursor moved to the intended owned point at all.
+                Thread.Sleep(180);
+                _ = GetCursorPos(out var immediateCursor);
+                Console.WriteLine($"NATIVE_POINTER_180MS_DELTA={immediateCursor.X - intendedScreenPoint.X},{immediateCursor.Y - intendedScreenPoint.Y}");
+                Console.WriteLine($"NATIVE_POINTER_180MS_TEST_FORM_ALIVE={IsWindow(testInput)}");
+                Console.WriteLine($"NATIVE_POINTER_180MS_TARGET_ALIVE={IsWindow(nativeButton)}");
+                Console.WriteLine($"NATIVE_POINTER_180MS_FOREGROUND_IS_TEST={GetForegroundWindow() == testInput}");
                 // A WinForms button may recreate its HWND when disabled.
                 // A stale pre-click HWND is NOT a valid native-effect receipt.
                 // Instead independently inspect the TEST FORM OWNED, visible
