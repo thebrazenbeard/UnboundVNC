@@ -47,6 +47,8 @@ internal sealed class AttendedControlLease
     private long lastGrantedEpoch = long.MinValue;
     private long lastSequence;
     private DateTimeOffset expiresAt;
+    private long grantedAtMonotonicStamp;
+    private TimeSpan monotonicDuration;
 
     internal bool Grant(
         LocalInputConsent consent, ControlTarget target,
@@ -54,6 +56,7 @@ internal sealed class AttendedControlLease
     {
         lock (sync)
         {
+            var grantedAtUtc = DateTimeOffset.UtcNow;
             // No general Firefox or desktop capability is authorized by this
             // synthetic test-only phase. A distinct attended UI and independent
             // real-window qualification are required to expand target policy.
@@ -63,12 +66,14 @@ internal sealed class AttendedControlLease
                 target.Bounds.Width is < 1 or > 1280 ||
                 target.Bounds.Height is < 1 or > 720 ||
                 sessionEpoch <= lastGrantedEpoch ||
-                expires <= DateTimeOffset.UtcNow ||
-                expires > DateTimeOffset.UtcNow.AddMinutes(5))
+                expires <= grantedAtUtc ||
+                expires > grantedAtUtc.AddMinutes(5))
                 return false;
             allowedTarget = target;
             allowedEpoch = lastGrantedEpoch = sessionEpoch;
             expiresAt = expires;
+            grantedAtMonotonicStamp = System.Diagnostics.Stopwatch.GetTimestamp();
+            monotonicDuration = expires - grantedAtUtc;
             lastSequence = 0;
             return true;
         }
@@ -111,7 +116,7 @@ internal sealed class AttendedControlLease
                 observed.ForegroundRoot == target.WindowHandle &&
                 observed.ForegroundOwnerPid == target.ProcessId &&
                 observed.TargetBounds == target.Bounds &&
-                observed.Now < expiresAt;
+                observed.Now < expiresAt && InsideRealDeadline();
         }
     }
     // Re-check AND apply a queued test-only UI effect under the same lock used
@@ -127,6 +132,15 @@ internal sealed class AttendedControlLease
             return true;
         }
     }
+    // A cached or caller-constructed observation may not extend permission.
+    // Both independently sampled current UTC and elapsed monotonic duration
+    // must remain inside the originally granted lease.
+    private bool InsideRealDeadline()
+    {
+        return DateTimeOffset.UtcNow < expiresAt &&
+            System.Diagnostics.Stopwatch.GetElapsedTime(grantedAtMonotonicStamp) < monotonicDuration;
+    }
+
     private bool TryAdmit(ControlObservation observed, long sequence)
     {
         if (allowedTarget is not ControlTarget target ||
@@ -136,6 +150,7 @@ internal sealed class AttendedControlLease
             observed.ForegroundOwnerPid != target.ProcessId ||
             observed.TargetBounds != target.Bounds ||
             observed.Now >= expiresAt ||
+            !InsideRealDeadline() ||
             sequence <= lastSequence || sequence < 1)
             return false;
         lastSequence = sequence;

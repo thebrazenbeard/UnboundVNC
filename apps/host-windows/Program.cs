@@ -272,6 +272,7 @@ internal static class RfbSession
         // Format negotiation is per-connection and cannot authorize any input.
         var redFirst = false;
         long inputSequence = 0;
+        using var controlFence = new RfbTestInputFence();
         while (true)
         {
             token.ThrowIfCancellationRequested();
@@ -303,26 +304,53 @@ internal static class RfbSession
                     break;
                 case 4: // TEST-OWNED form only; all ordinary sessions remain view-only.
                     await stream.ReadExactlyAsync(scratch.AsMemory(0, 7), token);
-                    if (testLease is not null && inputObservation is not null && testKeySink is not null)
+                    if (controlFence.Ready && testLease is not null && inputObservation is not null && testKeySink is not null)
                         _ = RfbInputDispatch.TryKey(testLease, scratch.AsSpan(0, 7),
                             inputObservation(), ++inputSequence, testKeySink);
                     break;
                 case 5: // No OS cursor or native mouse injection.
                     await stream.ReadExactlyAsync(scratch.AsMemory(0, 5), token);
-                    if (testLease is not null && inputObservation is not null && testPointerSink is not null)
+                    if (controlFence.Ready && testLease is not null && inputObservation is not null && testPointerSink is not null)
                         _ = RfbInputDispatch.TryPointer(testLease, scratch.AsSpan(0, 5),
                             width, height, desktop.Left, desktop.Top,
                             inputObservation(), ++inputSequence, testPointerSink);
                     break;
-                case 6: // ClientCutText deliberately discarded with bounded size.
+                case 6: // No general clipboard. Test-only explicit control epoch fence.
                     await stream.ReadExactlyAsync(scratch.AsMemory(0, 7), token);
                     uint length = BinaryPrimitives.ReadUInt32BigEndian(scratch.AsSpan(3, 4));
                     if (length > 65536) throw new InvalidDataException("Clipboard payload too large");
-                    while (length > 0)
+                    if (length > 128 || testLease is null || inputObservation is null)
                     {
-                        int chunk = (int)Math.Min(length, (uint)scratch.Length);
-                        await stream.ReadExactlyAsync(scratch.AsMemory(0, chunk), token);
-                        length -= (uint)chunk;
+                        while (length > 0)
+                        {
+                            int chunk = (int)Math.Min(length, (uint)scratch.Length);
+                            await stream.ReadExactlyAsync(scratch.AsMemory(0, chunk), token);
+                            length -= (uint)chunk;
+                        }
+                        break;
+                    }
+                    // This reserved test-only control extension uses a short,
+                    // bounded ClientCutText/ServerCutText exchange. Ordinary
+                    // RFB clipboard text continues to be discarded.
+                    var special = new byte[(int)length];
+                    await stream.ReadExactlyAsync(special, token);
+                    var command = Encoding.ASCII.GetString(special);
+                    if (command == RfbTestInputFence.Request)
+                    {
+                        if (controlFence.TryIssueChallenge(
+                            testLease.IsCurrent(inputObservation()), out string challenge))
+                        {
+                            var output = Encoding.ASCII.GetBytes(challenge);
+                            await stream.WriteAsync(new byte[] { 3, 0, 0, 0 }, token);
+                            await WriteU32(stream, (uint)output.Length, token);
+                            await stream.WriteAsync(output, token);
+                        }
+                    }
+                    else if (command.StartsWith(RfbTestInputFence.ResponsePrefix,
+                        StringComparison.Ordinal))
+                    {
+                        _ = controlFence.TryConfirm(testLease.IsCurrent(inputObservation()),
+                            command);
                     }
                     break;
                 default: throw new InvalidDataException("Unknown RFB client message");

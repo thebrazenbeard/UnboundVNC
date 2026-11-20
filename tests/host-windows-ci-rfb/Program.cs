@@ -210,6 +210,21 @@ internal static class Program
                 Require(testInput != IntPtr.Zero, "HOST_OWNED_TEST_INPUT_FORM_MISSING");
                 Console.WriteLine("SECOND_SYNTHETIC_CI_CONTROL_CLICK=NOT_HUMAN");
 
+                // The old view-only connection may already contain z. The
+                // source-matched host MUST NOT upgrade buffered KeyEvents.
+                // Instead only a fresh nonce received AFTER the local test
+                // grant can establish this test-owned input epoch.
+                WriteClientCutText(stream, "UNBOUNDVNC_TEST_CONTROL_REQUEST_V1");
+                string challengeText = ReadServerCutText(stream);
+                const string challengePrefix="UNBOUNDVNC_TEST_CONTROL_CHALLENGE_V1:";
+                Require(challengeText.StartsWith(challengePrefix, StringComparison.Ordinal) &&
+                    challengeText.Length == challengePrefix.Length + 43,
+                    "CONTROL_CHALLENGE_NOT_POSTGRANT");
+                // Postchallenge but pre-echo b must also stay blocked.
+                stream.Write(new byte[] { 4, 1, 0, 0, 0, 0, 0, 98 });
+                WriteClientCutText(stream, "UNBOUNDVNC_TEST_CONTROL_RESPONSE_V1:"+
+                    challengeText[challengePrefix.Length..]);
+                Console.WriteLine("POSTGRANT_CONTROL_FENCE_CHALLENGE_CONFIRMED=TEST_ONLY");
                 // Enter must remain prohibited. Only lower-case a may append to
                 // the exact local test form. This is NOT global/native injection.
                 stream.Write(new byte[] { 4, 1, 0, 0, 0, 0, 0xff, 0x0d });
@@ -459,6 +474,26 @@ internal static class Program
                 pixels[i * 4 + 2] == oracle[i * 3 + 2], "RFB_WINDOW_PATTERN_MISMATCH");
     }
 
+    private static void WriteClientCutText(NetworkStream stream, string command)
+    {
+        var contents = Encoding.ASCII.GetBytes(command);
+        Require(contents.Length <= 128, "UNBOUNDED_TEST_CONTROL_PAYLOAD");
+        var packet = new byte[8 + contents.Length];
+        packet[0] = 6; // ordinary ClientCutText, reserved test-only payload
+        BinaryPrimitives.WriteUInt32BigEndian(packet.AsSpan(4, 4), (uint)contents.Length);
+        contents.CopyTo(packet.AsSpan(8));
+        stream.Write(packet);
+    }
+
+    private static string ReadServerCutText(NetworkStream stream)
+    {
+        byte[] header = ReadExact(stream, 8);
+        Require(header[0] == 3 && header[1] == 0 && header[2] == 0 &&
+            header[3] == 0, "UNEXPECTED_CONTROL_SERVER_MESSAGE");
+        uint count = BinaryPrimitives.ReadUInt32BigEndian(header.AsSpan(4, 4));
+        Require(count is > 0 and <= 128, "INVALID_CONTROL_CHALLENGE_SIZE");
+        return Encoding.ASCII.GetString(ReadExact(stream, (int)count));
+    }
     private static byte[] ReadExact(Stream stream, int count)
     {
         var bytes = new byte[count];
