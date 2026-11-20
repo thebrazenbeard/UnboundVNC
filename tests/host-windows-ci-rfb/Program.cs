@@ -262,7 +262,9 @@ internal static class Program
                 Require(ReadOnlyOwnedTestEdit(host!, testInput) == "",
                     "NATIVE_TEST_FIELD_NOT_CLEARED_ON_APPROVAL");
                 stream.Write(new byte[] { 4, 1, 0, 0, 0, 0, 0, 97 }); // 'a' down
-                stream.Write(new byte[] { 4, 0, 0, 0, 0, 0, 97 }); // RFB release
+                var nativeRelease = new byte[] { 4, 0, 0, 0, 0, 0, 0, 97 }; // RFB KeyEvent: 8 bytes
+                Require(nativeRelease.Length == 8, "RFB_KEY_RELEASE_WRONG_LENGTH");
+                stream.Write(nativeRelease);
                 bool typedNative = WaitUntil(
                     () => ReadOnlyOwnedTestEdit(host!, testInput) == "a",
                     TimeSpan.FromSeconds(6));
