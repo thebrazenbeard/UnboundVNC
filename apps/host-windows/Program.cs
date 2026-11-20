@@ -119,6 +119,7 @@ internal sealed partial class HostWindow : Form
                 // One accepted session at a time; Start(1) still has an OS backlog of one.
                 if (activeClient is not null) continue;
                 activeClient = client;
+                string testSessionExit = "NONE";
                 try
                 {
                     var offeredEpoch = Volatile.Read(ref consentEpoch);
@@ -145,12 +146,29 @@ internal sealed partial class HostWindow : Form
                 }
                 catch (Exception ex) when (ex is IOException or SocketException or OperationCanceledException or InvalidDataException or ObjectDisposedException or System.ComponentModel.Win32Exception)
                 {
+                    testSessionExit = ex.GetType().Name;
                     // Deliberately no frame, credential, clipboard or desktop data is logged.
+                }
+                catch (Exception ex)
+                {
+                    testSessionExit = "UNEXPECTED_" + ex.GetType().Name;
+                    throw; // outer fail-closed handler still tears down listener
                 }
                 finally
                 {
                     RevokeTestInput();
                     if (ReferenceEquals(activeClient, client)) activeClient = null;
+                    var reason = testSessionExit;
+                    try
+                    {
+                        if (IsHandleCreated && !IsDisposed)
+                            BeginInvoke((Action)(() =>
+                            {
+                                if (!IsDisposed && listener is not null)
+                                    state.Text = "TEST_RFB_EXIT=" + reason;
+                            }));
+                    }
+                    catch (InvalidOperationException) { }
                 }
             }
         }

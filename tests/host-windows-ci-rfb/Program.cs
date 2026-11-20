@@ -314,6 +314,13 @@ internal static class Program
                 Console.WriteLine($"NATIVE_POINTER_HOST_ACTIVE_STATE={HasOwnedChildText(host!, window, "NATIVE TEST INPUT ONLY (owned form). Stop immediately revokes. No Firefox permission.")}");
                 Console.WriteLine($"NATIVE_POINTER_PORT_5901={IsPort5901Listening()}");
                 Console.WriteLine($"NATIVE_POINTER_CLIENT_CAN_READ={client.Client.Poll(0, SelectMode.SelectRead)}");
+                Console.WriteLine($"NATIVE_POINTER_CLIENT_AVAILABLE={client.Available}");
+                foreach (string exitKind in new[] { "IOException", "SocketException",
+                    "OperationCanceledException", "InvalidDataException",
+                    "ObjectDisposedException", "Win32Exception", "NONE",
+                    "UNEXPECTED_InvalidOperationException", "UNEXPECTED_ArgumentException" })
+                    if (HasOwnedChildText(host!, window, "TEST_RFB_EXIT="+exitKind))
+                        Console.WriteLine($"NATIVE_POINTER_RFB_EXIT={exitKind}");
                 // A WinForms button may recreate its HWND when disabled.
                 // A stale pre-click HWND is NOT a valid native-effect receipt.
                 // Instead independently inspect the TEST FORM OWNED, visible
