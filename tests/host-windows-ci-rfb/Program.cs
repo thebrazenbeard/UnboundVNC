@@ -285,9 +285,23 @@ internal static class Program
                     (byte)(py>>8), (byte)py });
                 stream.Write(new byte[] { 5, 0, (byte)(px>>8), (byte)px,
                     (byte)(py>>8), (byte)py });
-                Require(WaitUntil(
+                bool clickedNative = WaitUntil(
                     () => HasOwnedChildText(host!, testInput, "NATIVE_RFB_CLICK_COUNT=1"),
-                    TimeSpan.FromSeconds(6)), "WIN32_NATIVE_RFB_POINTER_NOT_OBSERVED");
+                    TimeSpan.FromSeconds(6));
+                if (!clickedNative)
+                {
+                    var screenPoint = new Point(bounds.Left + px, bounds.Top + py);
+                    var hitWindow = WindowFromPoint(screenPoint);
+                    var foreground = GetForegroundWindow();
+                    _ = GetCursorPos(out var cursorPosition);
+                    Console.WriteLine($"NATIVE_POINTER_HIT_EQUALS_TARGET={hitWindow == nativeButton}");
+                    Console.WriteLine($"NATIVE_POINTER_FOREGROUND_EQUALS_TEST_FORM={foreground == testInput}");
+                    Console.WriteLine($"NATIVE_POINTER_CURSOR_EQUALS_TARGET={Math.Abs(cursorPosition.X - screenPoint.X) <= 2 && Math.Abs(cursorPosition.Y - screenPoint.Y) <= 2}");
+                    Console.WriteLine($"NATIVE_POINTER_BUTTON_CAPTION_CHANGED={Caption(nativeButton) != "NATIVE RFB pointer click target"}");
+                    Console.WriteLine($"NATIVE_POINTER_BUTTON_SPAN={nativeBounds.Right-nativeBounds.Left}x{nativeBounds.Bottom-nativeBounds.Top}");
+                    Console.WriteLine($"NATIVE_POINTER_HOST_EXITED={host!.HasExited}");
+                }
+                Require(clickedNative, "WIN32_NATIVE_RFB_POINTER_NOT_OBSERVED");
                 Console.WriteLine("RFB_WIN32_SENDINPUT_POINTER_CLICK=PASS_TEST_FORM_ONLY");
 
 
@@ -799,6 +813,17 @@ internal static class Program
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetWindowRect(IntPtr hwnd, out WinRect rect);
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct WinPoint
+    {
+        public int X, Y;
+    }
+
+    [DllImport("user32.dll", EntryPoint = "WindowFromPoint")]
+    private static extern IntPtr WindowFromPoint(Point point);
+    [DllImport("user32.dll", EntryPoint = "GetCursorPos")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetCursorPos(out WinPoint point);
     private delegate bool EnumWindowCallback(IntPtr hwnd, IntPtr state);
     [DllImport("kernel32.dll")] private static extern uint WTSGetActiveConsoleSessionId();
     [DllImport("kernel32.dll")] private static extern uint GetCurrentThreadId();
