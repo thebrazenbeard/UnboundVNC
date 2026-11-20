@@ -316,7 +316,8 @@ internal static class Program
                 Console.WriteLine($"NATIVE_POINTER_CLIENT_CAN_READ={client.Client.Poll(0, SelectMode.SelectRead)}");
                 Console.WriteLine($"NATIVE_POINTER_CLIENT_AVAILABLE={client.Available}");
                 foreach (string exitKind in new[] { "IOException", "SocketException",
-                    "OperationCanceledException", "InvalidDataException",
+                    "OperationCanceledException", "InvalidDataException", "INVALID_TYPE",
+                    "UNSAFE_FRAME", "PIXEL_FORMAT", "CLIPBOARD_SIZE", "ENCODING_COUNT", "OTHER_INVALID_DATA",
                     "ObjectDisposedException", "Win32Exception", "NONE",
                     "UNEXPECTED_InvalidOperationException", "UNEXPECTED_ArgumentException" })
                     if (HasOwnedChildText(host!, window, "TEST_RFB_EXIT="+exitKind))

@@ -146,7 +146,15 @@ internal sealed partial class HostWindow : Form
                 }
                 catch (Exception ex) when (ex is IOException or SocketException or OperationCanceledException or InvalidDataException or ObjectDisposedException or System.ComponentModel.Win32Exception)
                 {
-                    testSessionExit = ex.GetType().Name;
+                    testSessionExit = ex is InvalidDataException ? ex.Message switch
+                    {
+                        "Unknown RFB client message" => "INVALID_TYPE",
+                        "Unsafe framebuffer request or desktop switch" => "UNSAFE_FRAME",
+                        "Unsupported pixel format" => "PIXEL_FORMAT",
+                        "Clipboard payload too large" => "CLIPBOARD_SIZE",
+                        "Too many encodings" => "ENCODING_COUNT",
+                        _ => "OTHER_INVALID_DATA"
+                    } : ex.GetType().Name;
                     // Deliberately no frame, credential, clipboard or desktop data is logged.
                 }
                 catch (Exception ex)
