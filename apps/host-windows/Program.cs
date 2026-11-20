@@ -119,6 +119,7 @@ internal sealed partial class HostWindow : Form
                 // One accepted session at a time; Start(1) still has an OS backlog of one.
                 if (activeClient is not null) continue;
                 activeClient = client;
+                string testSessionExit = "NONE";
                 try
                 {
                     var offeredEpoch = Volatile.Read(ref consentEpoch);
@@ -145,12 +146,40 @@ internal sealed partial class HostWindow : Form
                 }
                 catch (Exception ex) when (ex is IOException or SocketException or OperationCanceledException or InvalidDataException or ObjectDisposedException or System.ComponentModel.Win32Exception)
                 {
+                    testSessionExit = ex is InvalidDataException &&
+                        ex.Message.StartsWith("CI_UNKNOWN_TYPE_", StringComparison.Ordinal)
+                            ? ex.Message
+                            : ex is InvalidDataException ? ex.Message switch
+                    {
+                        "Unknown RFB client message" => "INVALID_TYPE",
+                        "Unsafe framebuffer request or desktop switch" => "UNSAFE_FRAME",
+                        "Unsupported pixel format" => "PIXEL_FORMAT",
+                        "Clipboard payload too large" => "CLIPBOARD_SIZE",
+                        "Too many encodings" => "ENCODING_COUNT",
+                        _ => "OTHER_INVALID_DATA"
+                    } : ex.GetType().Name;
                     // Deliberately no frame, credential, clipboard or desktop data is logged.
+                }
+                catch (Exception ex)
+                {
+                    testSessionExit = "UNEXPECTED_" + ex.GetType().Name;
+                    throw; // outer fail-closed handler still tears down listener
                 }
                 finally
                 {
                     RevokeTestInput();
                     if (ReferenceEquals(activeClient, client)) activeClient = null;
+                    var reason = testSessionExit;
+                    try
+                    {
+                        if (IsHandleCreated && !IsDisposed)
+                            BeginInvoke((Action)(() =>
+                            {
+                                if (!IsDisposed && listener is not null)
+                                    state.Text = "TEST_RFB_EXIT=" + reason;
+                            }));
+                    }
+                    catch (InvalidOperationException) { }
                 }
             }
         }
@@ -272,13 +301,17 @@ internal static class RfbSession
         // Format negotiation is per-connection and cannot authorize any input.
         var redFirst = false;
         long inputSequence = 0;
+        int previousClientType = -1;
         using var controlFence = new RfbTestInputFence();
         while (true)
         {
             token.ThrowIfCancellationRequested();
             if (!stillAuthorized() || !IsDefaultInputDesktop())
                 throw new OperationCanceledException("Consent revoked or desktop switched");
-            switch (await ReadByte(stream, token))
+            int clientType = await ReadByte(stream, token);
+            int precedingType = previousClientType;
+            previousClientType = clientType;
+            switch (clientType)
             {
                 case 0: // SetPixelFormat: only the advertised 32bpp little-endian truecolor format.
                     await stream.ReadExactlyAsync(scratch.AsMemory(0, 3), token);
@@ -353,7 +386,11 @@ internal static class RfbSession
                             command);
                     }
                     break;
-                default: throw new InvalidDataException("Unknown RFB client message");
+                default:
+                    if (Environment.GetEnvironmentVariable("UNBOUNDVNC_CI_SYNTHETIC_CONSENT") ==
+                        "explicit-runner-only")
+                        throw new InvalidDataException("CI_UNKNOWN_TYPE_" + clientType + "_AFTER_" + precedingType);
+                    throw new InvalidDataException("Unknown RFB client message");
             }
         }
     }

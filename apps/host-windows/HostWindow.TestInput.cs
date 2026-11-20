@@ -38,7 +38,16 @@ internal sealed partial class HostWindow
         Controls.Add(testInputButton);
         Controls.SetChildIndex(toggle, 0);
         testInputButton.Click += (_, _) => ArmTestInputForOwnedWindow();
-        testInputTimer.Tick += (_, _) => DrainTestInput();
+        testInputTimer.Tick += (_, _) =>
+        {
+            try { DrainTestInput(); }
+            catch (Exception ex) when (ex is InvalidOperationException or ObjectDisposedException or ArgumentException)
+            {
+                int gate = NativeOwnedTestFormInput.LastPointerGate;
+                RevokeTestInput();
+                if (!IsDisposed) state.Text = $"TEST_NATIVE_POINTER_REVOKED_STAGE={gate}";
+            }
+        };
         testInputTimer.Start();
         FormClosing += (_, _) =>
         {
