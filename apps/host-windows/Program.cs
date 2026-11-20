@@ -301,6 +301,7 @@ internal static class RfbSession
         // Format negotiation is per-connection and cannot authorize any input.
         var redFirst = false;
         long inputSequence = 0;
+        int previousClientType = -1;
         using var controlFence = new RfbTestInputFence();
         while (true)
         {
@@ -308,6 +309,8 @@ internal static class RfbSession
             if (!stillAuthorized() || !IsDefaultInputDesktop())
                 throw new OperationCanceledException("Consent revoked or desktop switched");
             int clientType = await ReadByte(stream, token);
+            int precedingType = previousClientType;
+            previousClientType = clientType;
             switch (clientType)
             {
                 case 0: // SetPixelFormat: only the advertised 32bpp little-endian truecolor format.
@@ -386,7 +389,7 @@ internal static class RfbSession
                 default:
                     if (Environment.GetEnvironmentVariable("UNBOUNDVNC_CI_SYNTHETIC_CONSENT") ==
                         "explicit-runner-only")
-                        throw new InvalidDataException("CI_UNKNOWN_TYPE_" + clientType);
+                        throw new InvalidDataException("CI_UNKNOWN_TYPE_" + clientType + "_AFTER_" + precedingType);
                     throw new InvalidDataException("Unknown RFB client message");
             }
         }

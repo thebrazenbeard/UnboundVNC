@@ -323,8 +323,10 @@ internal static class Program
                     if (HasOwnedChildText(host!, window, "TEST_RFB_EXIT="+exitKind))
                         Console.WriteLine($"NATIVE_POINTER_RFB_EXIT={exitKind}");
                 for (int type = 0; type < 256; type++)
-                    if (HasOwnedChildText(host!, window, "TEST_RFB_EXIT=CI_UNKNOWN_TYPE_"+type))
-                        Console.WriteLine($"NATIVE_POINTER_UNKNOWN_RFB_TYPE={type}");
+                    for (int preceding = -1; preceding <= 6; preceding++)
+                        if (HasOwnedChildText(host!, window,
+                                "TEST_RFB_EXIT=CI_UNKNOWN_TYPE_"+type+"_AFTER_"+preceding))
+                            Console.WriteLine($"NATIVE_POINTER_UNKNOWN_RFB_TYPE={type};PREVIOUS_TYPE={preceding}");
                 // A WinForms button may recreate its HWND when disabled.
                 // A stale pre-click HWND is NOT a valid native-effect receipt.
                 // Instead independently inspect the TEST FORM OWNED, visible
