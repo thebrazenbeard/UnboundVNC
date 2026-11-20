@@ -249,6 +249,84 @@ Check(!NativeOwnedTestFormInput.TryClickTestButton(
     new NormalizedPointer(101,101,2),(nint)42,
     new Rectangle(0,0,320,200),new Rectangle(90,90,60,60),1,true),
     "right-button input unexpectedly accepted");
+
+// Source-linked hostile regression: a failing native effect is an
+// indeterminate partial effect, not permission to retry with the same lease.
+var failKeyLease=new AttendedControlLease();
+var failKeyObs=obs with {SessionEpoch=701,Now=DateTimeOffset.UtcNow};
+Check(failKeyLease.Grant(LocalInputConsent.AllowControl,target,701,
+    DateTimeOffset.UtcNow.AddMinutes(1)), "throwing key setup denied");
+int failKeyCalls=0;
+bool keyThrew=false;
+try {
+    _=failKeyLease.TryDeliverKey(type,failKeyObs,1,_=>{
+        failKeyCalls++;
+        throw new InvalidOperationException("TEST_ONLY_KEY_EFFECT_THROW");
+    });
+}
+catch(InvalidOperationException ex) when (ex.Message=="TEST_ONLY_KEY_EFFECT_THROW") {
+    keyThrew=true;
+}
+Check(keyThrew&&failKeyCalls==1,"throwing key effect not observed exactly once");
+Check(!failKeyLease.IsCurrent(failKeyObs),"throwing key left control active");
+Check(!failKeyLease.TryDeliverKey(type,failKeyObs,2,_=>{failKeyCalls++;return true;}),
+    "throwing key allowed next event");
+Check(failKeyCalls==1,"next key callback ran after exception");
+Check(!failKeyLease.Grant(LocalInputConsent.AllowControl,target,701,
+    DateTimeOffset.UtcNow.AddMinutes(1)),"failed key silently rearmed same epoch");
+
+var failPointerLease=new AttendedControlLease();
+var failPointerObs=obs with {SessionEpoch=702,Now=DateTimeOffset.UtcNow};
+Check(failPointerLease.Grant(LocalInputConsent.AllowControl,target,702,
+    DateTimeOffset.UtcNow.AddMinutes(1)), "throwing pointer setup denied");
+int failPointerCalls=0;
+bool pointerThrew=false;
+try {
+    _=failPointerLease.TryDeliverPointer(click,failPointerObs,1,_=>{
+        failPointerCalls++;
+        throw new InvalidOperationException("TEST_ONLY_POINTER_EFFECT_THROW");
+    });
+}
+catch(InvalidOperationException ex) when(ex.Message=="TEST_ONLY_POINTER_EFFECT_THROW") {
+    pointerThrew=true;
+}
+Check(pointerThrew&&failPointerCalls==1,"throwing pointer effect not observed exactly once");
+Check(!failPointerLease.IsCurrent(failPointerObs),"throwing pointer left control active");
+Check(!failPointerLease.TryDeliverPointer(click,failPointerObs,2,_=>{failPointerCalls++;return true;}),
+    "throwing pointer allowed next event");
+Check(failPointerCalls==1,"next pointer callback ran after exception");
+
+var failUiLease=new AttendedControlLease();
+var failUiObs=obs with {SessionEpoch=703,Now=DateTimeOffset.UtcNow};
+Check(failUiLease.Grant(LocalInputConsent.AllowControl,target,703,
+    DateTimeOffset.UtcNow.AddMinutes(1)), "throwing UI setup denied");
+int failUiCalls=0;
+bool uiThrew=false;
+try {
+    _=failUiLease.TryApplyWhileCurrent(failUiObs,()=>{
+        failUiCalls++;
+        throw new InvalidOperationException("TEST_ONLY_QUEUED_EFFECT_THROW");
+    });
+}
+catch(InvalidOperationException ex) when(ex.Message=="TEST_ONLY_QUEUED_EFFECT_THROW") {
+    uiThrew=true;
+}
+Check(uiThrew&&failUiCalls==1,"throwing queued effect not observed exactly once");
+Check(!failUiLease.IsCurrent(failUiObs),"throwing queued effect left control active");
+Check(!failUiLease.TryApplyWhileCurrent(failUiObs,()=>failUiCalls++),
+    "throwing queued effect allowed follow-on callback");
+Check(failUiCalls==1,"queued callback ran after exception");
+
+var falseLease=new AttendedControlLease();
+var falseObs=obs with {SessionEpoch=704,Now=DateTimeOffset.UtcNow};
+Check(falseLease.Grant(LocalInputConsent.AllowControl,target,704,
+    DateTimeOffset.UtcNow.AddMinutes(1)), "false-return setup denied");
+Check(!falseLease.TryDeliverKey(type,falseObs,1,_=>false),
+    "false effect was misreported as success");
+Check(!falseLease.IsCurrent(falseObs),"false effect retained control");
+Check(!falseLease.TryDeliverKey(type,falseObs,2,_=>true),
+    "failed effect was retried under old approval");
+
 Console.WriteLine("CONTROL_LEASE_GATE_PASS="+assertions);
 
 static byte[] Key(uint keysym)
