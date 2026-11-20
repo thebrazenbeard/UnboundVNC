@@ -229,6 +229,26 @@ Check(altNonce!=canonNonce,"negative nonce must differ");
 Check(!noncanonicalFence.TryConfirm(true,RfbTestInputFence.ResponsePrefix+altNonce),
     "noncanonical final base64url bits were accepted");
 Check(!noncanonicalFence.Ready,"noncanonical response unlocked test input");
+Check(!NativeOwnedTestFormInput.TryTypeTestChar(
+    new NormalizedKey(true,LocalKeyKind.Printable,'a'), nint.Zero,
+    new Rectangle(0,0,320,200),true,1,true),
+    "zero native target HWND unexpectedly accepted test key");
+Check(!NativeOwnedTestFormInput.TryTypeTestChar(
+    new NormalizedKey(true,LocalKeyKind.Printable,'a'), (nint)42,
+    new Rectangle(0,0,320,200),false,1,true),
+    "unfocused test field unexpectedly accepted key");
+Check(!NativeOwnedTestFormInput.TryTypeTestChar(
+    new NormalizedKey(true,LocalKeyKind.Printable,'A'), (nint)42,
+    new Rectangle(0,0,320,200),true,1,true),
+    "out-of-scope uppercase input accepted");
+Check(!NativeOwnedTestFormInput.TryClickTestButton(
+    new NormalizedPointer(101,101,1),nint.Zero,
+    new Rectangle(0,0,320,200),new Rectangle(90,90,60,60),1,true),
+    "zero target HWND unexpectedly accepted native pointer");
+Check(!NativeOwnedTestFormInput.TryClickTestButton(
+    new NormalizedPointer(101,101,2),(nint)42,
+    new Rectangle(0,0,320,200),new Rectangle(90,90,60,60),1,true),
+    "right-button input unexpectedly accepted");
 Console.WriteLine("CONTROL_LEASE_GATE_PASS="+assertions);
 
 static byte[] Key(uint keysym)
