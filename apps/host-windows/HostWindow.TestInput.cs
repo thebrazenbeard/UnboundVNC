@@ -47,7 +47,8 @@ internal sealed partial class HostWindow
     // Called on WinForms UI thread ONLY after the original view-only approval.
     private void SetTestInputAvailable(long controlEpoch)
     {
-        if (IsDisposed || listener is null || Volatile.Read(ref activeClient) is null)
+        if (IsDisposed || listener is null || Volatile.Read(ref activeClient) is null ||
+            controlEpoch != Interlocked.Read(ref controlSessionEpoch))
             return;
         Interlocked.Exchange(ref activeTestEpoch, controlEpoch);
         testInputButton.Enabled = true;

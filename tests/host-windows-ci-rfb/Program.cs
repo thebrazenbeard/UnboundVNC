@@ -215,8 +215,21 @@ internal static class Program
                 stream.Write(new byte[] { 4, 1, 0, 0, 0, 0, 0xff, 0x0d });
                 stream.Write(new byte[] { 4, 1, 0, 0, 0, 0, 0, 97 });
                 stream.Write(new byte[] { 4, 0, 0, 0, 0, 0, 0, 97 });
-                Require(WaitUntil(() => ReadOnlyOwnedTestEdit(host!, testInput) == "a",
-                        TimeSpan.FromSeconds(6)),
+                bool matchedSyntheticInput = WaitUntil(
+                    () => ReadOnlyOwnedTestEdit(host!, testInput) == "a",
+                    TimeSpan.FromSeconds(6));
+                if (!matchedSyntheticInput)
+                {
+                    // Only disposable host-test metadata, no private pixels or text.
+                    var syntheticText = ReadOnlyOwnedTestEdit(host!, testInput);
+                    IntPtr actualForeground = GetForegroundWindow();
+                    GetWindowThreadProcessId(actualForeground, out uint foregroundPid);
+                    Console.WriteLine($"SYNTHETIC_FORM_FOREGROUND_MATCH={actualForeground == testInput}");
+                    Console.WriteLine($"SYNTHETIC_FOREGROUND_OWNED_BY_TEST_HOST={foregroundPid == (uint)host!.Id}");
+                    Console.WriteLine($"SYNTHETIC_TEST_EDIT_FOUND={syntheticText is not null}");
+                    Console.WriteLine($"SYNTHETIC_TEST_EDIT_LENGTH={syntheticText?.Length ?? -1}");
+                }
+                Require(matchedSyntheticInput,
                     "RFBCONTROL_TEST_OWNED_TEXTBOX_DID_NOT_EQUAL_A");
                 Console.WriteLine("RFB_TEST_OWNED_FORM_KEY_A_ONLY=PASS");
 
@@ -668,6 +681,8 @@ internal static class Program
     [DllImport("user32.dll", EntryPoint = "SendMessageTimeoutW", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern IntPtr SendMessageTimeoutText(IntPtr hwnd, uint message, IntPtr wparam,
         StringBuilder lparam, uint flags, uint timeoutMs, out IntPtr result);
+    [DllImport("user32.dll", EntryPoint = "GetForegroundWindow")]
+    private static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern int GetWindowText(IntPtr hwnd, StringBuilder text, int maxCount);
     [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
