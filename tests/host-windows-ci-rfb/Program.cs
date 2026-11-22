@@ -262,7 +262,9 @@ internal static class Program
                 Require(ReadOnlyOwnedTestEdit(host!, testInput) == "",
                     "NATIVE_TEST_FIELD_NOT_CLEARED_ON_APPROVAL");
                 stream.Write(new byte[] { 4, 1, 0, 0, 0, 0, 0, 97 }); // 'a' down
-                stream.Write(new byte[] { 4, 0, 0, 0, 0, 0, 97 }); // RFB release
+                var nativeRelease = new byte[] { 4, 0, 0, 0, 0, 0, 0, 97 }; // RFB KeyEvent: 8 bytes
+                Require(nativeRelease.Length == 8, "RFB_KEY_RELEASE_WRONG_LENGTH");
+                stream.Write(nativeRelease);
                 bool typedNative = WaitUntil(
                     () => ReadOnlyOwnedTestEdit(host!, testInput) == "a",
                     TimeSpan.FromSeconds(6));
@@ -281,17 +283,60 @@ internal static class Program
                 int py = (nativeBounds.Top + nativeBounds.Bottom) / 2 - bounds.Top;
                 Require(px is >= 1 and < 1280 && py is >= 1 and < 720,
                     "NATIVE_POINTER_OUTSIDE_TEST_FRAME");
+                // Independent BEFORE-input Windows hit-test prevents treating
+                // a misplaced or occluded target as an injection failure.
+                var intendedScreenPoint = new Point(bounds.Left + px, bounds.Top + py);
+                Console.WriteLine($"NATIVE_POINTER_PREFLIGHT_HWND_VALID={IsWindow(nativeButton)}");
+                Console.WriteLine($"NATIVE_POINTER_PREFLIGHT_ENABLED={IsWindowEnabled(nativeButton)}");
+                Console.WriteLine($"NATIVE_POINTER_PREFLIGHT_HIT={WindowFromPoint(intendedScreenPoint) == nativeButton}");
+                Console.WriteLine($"NATIVE_POINTER_PREFLIGHT_FOREGROUND={GetForegroundWindow() == testInput}");
+                Require(IsWindow(nativeButton) && IsWindowEnabled(nativeButton) &&
+                    WindowFromPoint(intendedScreenPoint) == nativeButton &&
+                    GetForegroundWindow() == testInput, "NATIVE_POINTER_PREFLIGHT_NOT_OWNED");
+                Require(!HasOwnedChildText(host!, testInput, "NATIVE_RFB_CLICK_COUNT=1"),
+                    "NATIVE_POINTER_EFFECT_PREEXISTED_BEFORE_RFB");
                 stream.Write(new byte[] { 5, 1, (byte)(px>>8), (byte)px,
                     (byte)(py>>8), (byte)py });
                 stream.Write(new byte[] { 5, 0, (byte)(px>>8), (byte)px,
                     (byte)(py>>8), (byte)py });
+                // Diagnostic only, on disposable runner: determine if the
+                // native cursor moved to the intended owned point at all.
+                Thread.Sleep(180);
+                _ = GetCursorPos(out var immediateCursor);
+                Console.WriteLine($"NATIVE_POINTER_180MS_DELTA={immediateCursor.X - intendedScreenPoint.X},{immediateCursor.Y - intendedScreenPoint.Y}");
+                Console.WriteLine($"NATIVE_POINTER_180MS_TEST_FORM_ALIVE={IsWindow(testInput)}");
+                Console.WriteLine($"NATIVE_POINTER_180MS_TARGET_ALIVE={IsWindow(nativeButton)}");
+                Console.WriteLine($"NATIVE_POINTER_180MS_FOREGROUND_IS_TEST={GetForegroundWindow() == testInput}");
+                // Only exact source-defined test status labels can be read.
+                foreach (int stage in new[] {0,1,2,3,4,10,11,12,13})
+                    if (HasOwnedChildText(host!, window, "TEST_NATIVE_POINTER_REVOKED_STAGE="+stage))
+                        Console.WriteLine($"NATIVE_POINTER_HOST_REVOKED_STAGE={stage}");
+                Console.WriteLine($"NATIVE_POINTER_HOST_STOPPED={HasOwnedChildText(host!, window, "Stopped. All connections revoked.")}");
+                Console.WriteLine($"NATIVE_POINTER_HOST_INTERNAL_ERROR={HasOwnedChildText(host!, window, "Local preview stopped after an internal error. Restart to retry.")}");
+                Console.WriteLine($"NATIVE_POINTER_HOST_ACTIVE_STATE={HasOwnedChildText(host!, window, "NATIVE TEST INPUT ONLY (owned form). Stop immediately revokes. No Firefox permission.")}");
+                Console.WriteLine($"NATIVE_POINTER_PORT_5901={IsPort5901Listening()}");
+                Console.WriteLine($"NATIVE_POINTER_CLIENT_CAN_READ={client.Client.Poll(0, SelectMode.SelectRead)}");
+                Console.WriteLine($"NATIVE_POINTER_CLIENT_AVAILABLE={client.Available}");
+                foreach (string exitKind in new[] { "IOException", "SocketException",
+                    "OperationCanceledException", "InvalidDataException", "INVALID_TYPE",
+                    "UNSAFE_FRAME", "PIXEL_FORMAT", "CLIPBOARD_SIZE", "ENCODING_COUNT", "OTHER_INVALID_DATA",
+                    "ObjectDisposedException", "Win32Exception", "NONE",
+                    "UNEXPECTED_InvalidOperationException", "UNEXPECTED_ArgumentException" })
+                    if (HasOwnedChildText(host!, window, "TEST_RFB_EXIT="+exitKind))
+                        Console.WriteLine($"NATIVE_POINTER_RFB_EXIT={exitKind}");
+                for (int type = 0; type < 256; type++)
+                    for (int preceding = -1; preceding <= 6; preceding++)
+                        if (HasOwnedChildText(host!, window,
+                                "TEST_RFB_EXIT=CI_UNKNOWN_TYPE_"+type+"_AFTER_"+preceding))
+                            Console.WriteLine($"NATIVE_POINTER_UNKNOWN_RFB_TYPE={type};PREVIOUS_TYPE={preceding}");
+                // A WinForms button may recreate its HWND when disabled.
+                // A stale pre-click HWND is NOT a valid native-effect receipt.
+                // Instead independently inspect the TEST FORM OWNED, visible
+                // click-handler label. The only path to this label in the host
+                // is the real WinForms button Click handler, not BM_CLICK or
+                // a model-asserted result.
                 bool clickedNative = WaitUntil(
-                    () =>
-                    {
-                        GetWindowThreadProcessId(nativeButton, out uint testButtonOwner);
-                        return testButtonOwner == (uint)host!.Id &&
-                            IsWindow(nativeButton) && !IsWindowEnabled(nativeButton);
-                    },
+                    () => HasOwnedChildText(host!, testInput, "NATIVE_RFB_CLICK_COUNT=1"),
                     TimeSpan.FromSeconds(6));
                 if (!clickedNative)
                 {

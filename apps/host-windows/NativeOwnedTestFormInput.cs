@@ -11,6 +11,12 @@ namespace UnboundVnc.Host.Windows;
 /// </summary>
 internal static class NativeOwnedTestFormInput
 {
+    // PRIVATE test-owned status; no desktop content, keys or coordinates.
+    // 0=not attempted, 1=bad button/geometry, 2=OS/window scope denied,
+    // 3=virtual desktop range denied, 4=SendInput attempted,
+    // 10..13=actual inserted count. No client-controlled status.
+    private static int lastPointerGate;
+    internal static int LastPointerGate => Volatile.Read(ref lastPointerGate);
     private const uint InputMouse = 0, InputKeyboard = 1;
     private const uint KeyUnicode = 0x0004, KeyUp = 0x0002;
     private const uint MouseMove = 0x0001, MouseLeftDown = 0x0002,
@@ -118,14 +124,18 @@ internal static class NativeOwnedTestFormInput
         nint exactTestHwnd, Rectangle exactTestBounds,
         Rectangle exactButtonBounds, long epoch, bool sessionCurrent)
     {
+        Volatile.Write(ref lastPointerGate, 1);
         if (pointer.Buttons != 1 ||
             !exactButtonBounds.Contains(pointer.ScreenX, pointer.ScreenY) ||
-            !exactTestBounds.Contains(pointer.ScreenX, pointer.ScreenY) ||
-            !IsHostOwnedCurrentTarget(exactTestHwnd, exactTestBounds, epoch, sessionCurrent))
+            !exactTestBounds.Contains(pointer.ScreenX, pointer.ScreenY))
+            return false;
+        Volatile.Write(ref lastPointerGate, 2);
+        if (!IsHostOwnedCurrentTarget(exactTestHwnd, exactTestBounds, epoch, sessionCurrent))
             return false;
 
         int left = GetSystemMetrics(76), top = GetSystemMetrics(77);
         int width = GetSystemMetrics(78), height = GetSystemMetrics(79);
+        Volatile.Write(ref lastPointerGate, 3);
         if (width < 2 || height < 2 ||
             pointer.ScreenX < left || pointer.ScreenX >= (long)left + width ||
             pointer.ScreenY < top || pointer.ScreenY >= (long)top + height)
@@ -157,8 +167,10 @@ internal static class NativeOwnedTestFormInput
                 }
             }
         };
+        Volatile.Write(ref lastPointerGate, 4);
         uint written = SendInputNative((uint)pair.Length, pair,
             Marshal.SizeOf<InputRecord>());
+        Volatile.Write(ref lastPointerGate, 10 + (int)Math.Min(written, 3));
         if (written == (uint)pair.Length) return true;
         // A partial batch after MOVE and LEFTDOWN can leave the button
         // pressed. Best-effort LEFTUP, then fail closed (not a success).
