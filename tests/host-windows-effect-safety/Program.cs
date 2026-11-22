@@ -9,13 +9,21 @@ if (!Path.GetFileName(hostDll).Equals("UnboundVnc.Host.Windows.dll", StringCompa
     !File.Exists(Path.ChangeExtension(hostDll, ".exe")))
     throw new ArgumentException("Expected the host managed DLL beside its built native EXE apphost.");
 
-Check("actual host assembly has no new user32 input-effect import", () =>
+Check("actual host assembly limits native input to owned synthetic form adapter", () =>
 {
     var host = Assembly.LoadFrom(hostDll);
     Require(host.GetName().Name == "UnboundVnc.Host.Windows", "inspecting an unexpected managed assembly");
-    AssertAllowedNativeImports(host.GetTypes().SelectMany(type => type.GetMethods(
+    var hostMethods = host.GetTypes().SelectMany(type => type.GetMethods(
         BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static |
-        BindingFlags.Instance | BindingFlags.DeclaredOnly)));
+        BindingFlags.Instance | BindingFlags.DeclaredOnly)).ToArray();
+    AssertAllowedNativeImports(hostMethods);
+    var nativeTestSenders = hostMethods.Where(method =>
+        method.GetCustomAttribute<DllImportAttribute>() is { EntryPoint: "SendInput" }).ToArray();
+    Require(nativeTestSenders.Length == 1 &&
+        nativeTestSenders[0].DeclaringType?.FullName ==
+            "UnboundVnc.Host.Windows.NativeOwnedTestFormInput" &&
+        nativeTestSenders[0].IsPrivate,
+        "only one private test-owned SendInput import may exist");
     Require(!NativeInputAdapter.Enabled, "source adapter unexpectedly enabled");
     Require(!NativeInputAdapter.TryInject(new NormalizedKey(true, LocalKeyKind.Printable, 'x'),
         LocalInputConsent.AllowControl, true, true), "source key adapter injected");
@@ -180,13 +188,22 @@ Check("concurrent Stop revokes in-flight fake effect before returning", () =>
     finally { resume.Set(); }
 });
 
-Console.WriteLine("PASS: 10 hosted Windows native-effect negative groups; real native input remains OFF");
+Console.WriteLine("PASS: 10 hosted Windows native-effect negative groups; native effects restricted to host-owned synthetic test form");
 
 static void AssertAllowedNativeImports(IEnumerable<MethodInfo> methods)
 {
     var allowedUser32 = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         { "OpenInputDesktop", "GetUserObjectInformationW", "CloseDesktop",
           "GetForegroundWindow", "GetAncestor", "GetWindowThreadProcessId", "GetWindowRect" };
+    // Runtime input is a real OS effect but narrowly compiled into the
+    // dedicated TEST-OWNED form only. Never permit a same-name method from
+    // another class/assembly or an unrestricted input package.
+    static bool AllowedTestNative(MethodInfo method, DllImportAttribute import, string entry) =>
+        method.DeclaringType?.FullName == "UnboundVnc.Host.Windows.NativeOwnedTestFormInput" &&
+        method.IsPrivate &&
+        import.Value.Equals("user32.dll", StringComparison.OrdinalIgnoreCase) &&
+        ((entry == "SendInput" && method.Name == "SendInputNative") ||
+         (entry == "GetSystemMetrics" && method.Name == "GetSystemMetrics"));
     var prohibited = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         { "SendInput", "SetCursorPos", "mouse_event", "keybd_event", "SendMessageW", "PostMessageW" };
     foreach (var method in methods)
@@ -194,9 +211,11 @@ static void AssertAllowedNativeImports(IEnumerable<MethodInfo> methods)
         var import = method.GetCustomAttribute<DllImportAttribute>();
         if (import is null) continue;
         var entryPoint = import.EntryPoint ?? method.Name;
-        Require(!prohibited.Contains(entryPoint), $"native input entry point present: {entryPoint}");
+        bool testNative = AllowedTestNative(method, import, entryPoint);
+        Require(!prohibited.Contains(entryPoint) || testNative,
+            $"unreviewed native input entry point: {entryPoint}");
         if (import.Value.Equals("user32.dll", StringComparison.OrdinalIgnoreCase))
-            Require(allowedUser32.Contains(entryPoint), $"unexpected user32 import: {entryPoint}");
+            Require(allowedUser32.Contains(entryPoint) || testNative, $"unexpected user32 import: {entryPoint}");
     }
 }
 
