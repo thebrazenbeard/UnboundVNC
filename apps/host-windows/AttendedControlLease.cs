@@ -128,8 +128,18 @@ internal sealed class AttendedControlLease
         lock (sync)
         {
             if (!IsCurrent(observed)) return false;
-            apply(); // MUST be bounded, nonblocking and local test-form only.
-            return true;
+            try
+            {
+                apply(); // MUST be bounded, nonblocking and local test-form only.
+                return true;
+            }
+            catch
+            {
+                // An effect failure can mean partial or unknown OS input.
+                // Never leave this approval usable for a later callback.
+                RevokeUnderLock();
+                throw;
+            }
         }
     }
     // A cached or caller-constructed observation may not extend permission.
@@ -170,7 +180,17 @@ internal sealed class AttendedControlLease
             if (key.Kind != LocalKeyKind.Printable ||
                 key.Character is < (char)0x20 or > (char)0x7e ||
                 !TryAdmit(observed, sequence)) return false;
-            return effect(key);
+            try
+            {
+                bool delivered = effect(key);
+                if (!delivered) RevokeUnderLock();
+                return delivered;
+            }
+            catch
+            {
+                RevokeUnderLock();
+                throw;
+            }
         }
     }
 
@@ -185,17 +205,34 @@ internal sealed class AttendedControlLease
                 (pointer.Buttons & ~1) != 0 ||
                 !target.Bounds.Contains(pointer.ScreenX, pointer.ScreenY) ||
                 !TryAdmit(observed, sequence)) return false;
-            return effect(pointer);
+            try
+            {
+                bool delivered = effect(pointer);
+                if (!delivered) RevokeUnderLock();
+                return delivered;
+            }
+            catch
+            {
+                RevokeUnderLock();
+                throw;
+            }
         }
     }
+    // Caller holds sync. This is shared by Stop, unsuccessful native effects
+    // and throwing callbacks, so permission cannot survive an unknown effect.
+    private void RevokeUnderLock()
+    {
+        allowedTarget = null;
+        // Prevent silent re-arm on the prior approved session epoch.
+        lastGrantedEpoch = Math.Max(lastGrantedEpoch, allowedEpoch);
+        lastSequence = 0;
+    }
+
     internal void Revoke()
     {
         lock (sync)
         {
-            allowedTarget = null;
-            // Prevent silent re-arm on the prior approved session epoch.
-            lastGrantedEpoch = Math.Max(lastGrantedEpoch, allowedEpoch);
-            lastSequence = 0;
+            RevokeUnderLock();
         }
     }
 }
